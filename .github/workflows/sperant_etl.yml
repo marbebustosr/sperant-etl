@@ -2,6 +2,59 @@ name: Sperant → Supabase ETL
 
 on:
   schedule:
+    - cron: "0 11 * * *"   # 6am Lima = 11 UTC
+  workflow_dispatch:
+    inputs:
+      lookback_months:
+        description: "Months to reprocess (default 3)"
+        required: false
+        default: "3"
+
+permissions:
+  issues: write
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r etl/requirements.txt
+
+      - name: Run ETL
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB: ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LOOKBACK_MONTHS: ${{ github.event.inputs.lookback_months || '3' }}
+        run: python etl/sperant_etl.py
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `ETL failed — ${new Date().toISOString().slice(0,10)}`,
+              body: `The Sperant → Supabase ETL failed.\n\nCheck the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['etl-failure']
+            })
+name: Sperant → Supabase ETL
+
+on:
+  schedule:
     - cron: "0 11 * * *"
 
   workflow_dispatch:
