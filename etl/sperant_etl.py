@@ -506,7 +506,7 @@ def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
         batch = records[i : i + batch_size]
         payload = json.dumps({"rows": batch})
         resp = requests.post(url, headers=headers, data=payload, timeout=120)
-        if resp.status_code not in (200, 201):
+        if resp.status_code not in (200, 201, 204):  # 204 = void fn success
             log.error("RPC kpis upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
         total_processed += len(batch)
