@@ -91,9 +91,39 @@ PROJECTS = [
         "utm_filter":    None,
     },
     {
+        "sperant_code":  "LF",
+        "supabase_id":   "3fbbcbd7-10a3-7d4e-e808-94ad9d50daaf",
+        "nombre":        "06 Las Fresas",
+        "utm_filter":    None,
+    },
+    {
+        "sperant_code":  "G154",
+        "supabase_id":   "6b9a0c80-6617-e2a3-2c2e-1373c734fc47",
+        "nombre":        "07 Grid",
+        "utm_filter":    None,
+    },
+    {
+        "sperant_code":  "NERVI",
+        "supabase_id":   "d3666a4b-1a3f-98fd-cae9-72226c4a2a12",
+        "nombre":        "10 Nervi",
+        "utm_filter":    None,
+    },
+    {
         "sperant_code":  "M144",
         "supabase_id":   "5d276280-cf3d-fb0e-f8e8-69ee7f96fb14",
         "nombre":        "11 Morales",
+        "utm_filter":    None,
+    },
+    {
+        "sperant_code":  "PREVERDE",
+        "supabase_id":   "0bc7bfc5-f2d7-73d3-c1f0-61b74ee73a8b",
+        "nombre":        "12 Precursores Verde",
+        "utm_filter":    None,
+    },
+    {
+        "sperant_code":  "R125",
+        "supabase_id":   "bfd04ac2-9070-37b1-f4b1-5fba42b0b05f",
+        "nombre":        "13 Romana",
         "utm_filter":    None,
     },
 ]
