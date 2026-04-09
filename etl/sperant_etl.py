@@ -487,6 +487,34 @@ def compute_kpis(
     }
 
 
+
+
+def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
+    """
+    Upsert sperant_kpis via the upsert_sperant_kpis(JSONB) SECURITY DEFINER function.
+    Bypasses RLS — mirrors supabase_rpc_upsert_leads.
+    """
+    if not records:
+        return
+
+    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_kpis"
+    headers = _supabase_headers()
+
+    batch_size = 200
+    total_processed = 0
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
+        payload = json.dumps({"rows": batch})
+        resp = requests.post(url, headers=headers, data=payload, timeout=120)
+        if resp.status_code not in (200, 201):
+            log.error("RPC kpis upsert error %s: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+        total_processed += len(batch)
+        log.info("  ✓ RPC kpis: processed batch %d-%d", i, i + len(batch))
+
+    log.info("  ✓ Upserted %d KPI rows via RPC", total_processed)
+
+
 # ---------------------------------------------------------------------------
 # Main ETL loop
 # ---------------------------------------------------------------------------
@@ -569,14 +597,10 @@ def run_etl():
         log.info("Upserting %d lead rows via RPC...", len(all_leads_rows))
         supabase_rpc_upsert_leads(all_leads_rows)
 
-    # Upsert KPIs via direct REST (anon write RLS policy)
+    # Upsert KPIs via SECURITY DEFINER RPC (bypasses RLS without service_role)
     if all_kpis_rows:
-        log.info("Upserting %d KPI rows...", len(all_kpis_rows))
-        supabase_upsert(
-            "sperant_kpis",
-            all_kpis_rows,
-            on_conflict="project_id,periodo_anio,periodo_mes",
-        )
+        log.info("Upserting %d KPI rows via RPC...", len(all_kpis_rows))
+        supabase_rpc_upsert_kpis(all_kpis_rows)
 
     log.info("=== ETL complete ===")
 
