@@ -25,6 +25,10 @@ ALTER TABLE sperant_leads
   ADD COLUMN IF NOT EXISTS tiene_proforma         BOOLEAN DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS tiene_separacion       BOOLEAN DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS tiene_venta            BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS utm_source             VARCHAR(100),
+  ADD COLUMN IF NOT EXISTS utm_campaign           VARCHAR(200),
+  ADD COLUMN IF NOT EXISTS utm_content            VARCHAR(200),
+  ADD COLUMN IF NOT EXISTS asesor_nombre          VARCHAR(200),
   ADD COLUMN IF NOT EXISTS created_at             TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS updated_at             TIMESTAMPTZ DEFAULT NOW();
 

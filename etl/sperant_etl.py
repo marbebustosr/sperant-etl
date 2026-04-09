@@ -272,9 +272,12 @@ def extract_lead_details(
         SELECT
             cliente_id,
             documento_cliente,
-            MAX(nombres_cliente)  AS nombres,
+            MAX(nombres_cliente)   AS nombres,
             MAX(apellidos_cliente) AS apellidos,
-            MIN(fecha_creacion)   AS fecha_llegada_meta
+            MIN(fecha_creacion)    AS fecha_llegada_meta,
+            MAX(utm_source)        AS utm_source,
+            MAX(utm_campaign)      AS utm_campaign,
+            MAX(utm_content)       AS utm_content
         FROM tuna.interacciones
         WHERE codigo_proyecto = '{sperant_code}'
           AND DATE_PART('year',  fecha_creacion) = {year}
@@ -368,6 +371,26 @@ def extract_lead_details(
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND i.nivel_interes = 'venta'
+    ),
+
+    -- 9. First asesor (human user) who interacted with each lead
+    primer_asesor AS (
+        SELECT
+            i.cliente_id,
+            FIRST_VALUE(i.nombres_usuario)
+                OVER (PARTITION BY i.cliente_id ORDER BY i.fecha_creacion ASC
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                ) AS asesor_nombre
+        FROM tuna.interacciones i
+        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND i.fecha_creacion  > ml.fecha_llegada_meta
+          AND i.nombres_usuario IS NOT NULL
+          AND i.nombres_usuario != ''
+          AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento', 'api')
+    ),
+    primer_asesor_dedup AS (
+        SELECT DISTINCT cliente_id, asesor_nombre FROM primer_asesor
     )
 
     -- Final join
@@ -388,15 +411,20 @@ def extract_lead_details(
         CASE WHEN ue.nivel_interes = 'desestimado' THEN TRUE ELSE FALSE END AS es_desestimado,
         COALESCE(pf.tiene_proforma,  FALSE)                    AS tiene_proforma,
         COALESCE(sp.tiene_separacion, FALSE)                   AS tiene_separacion,
-        COALESCE(vt.tiene_venta,     FALSE)                    AS tiene_venta
+        COALESCE(vt.tiene_venta,     FALSE)                    AS tiene_venta,
+        ml.utm_source,
+        ml.utm_campaign,
+        ml.utm_content,
+        pa.asesor_nombre
     FROM meta_leads ml
-    LEFT JOIN creacion_sperant  cs ON cs.cliente_id = ml.cliente_id
-    LEFT JOIN primera_humana    ph ON ph.cliente_id = ml.cliente_id
-    LEFT JOIN total_ints        ti ON ti.cliente_id = ml.cliente_id
-    LEFT JOIN ultimo_estado_dedup ue ON ue.cliente_id = ml.cliente_id
-    LEFT JOIN proformas         pf ON pf.cliente_id = ml.cliente_id
-    LEFT JOIN separaciones      sp ON sp.cliente_id = ml.cliente_id
-    LEFT JOIN ventas            vt ON vt.cliente_id = ml.cliente_id
+    LEFT JOIN creacion_sperant     cs ON cs.cliente_id = ml.cliente_id
+    LEFT JOIN primera_humana       ph ON ph.cliente_id = ml.cliente_id
+    LEFT JOIN total_ints           ti ON ti.cliente_id = ml.cliente_id
+    LEFT JOIN ultimo_estado_dedup  ue ON ue.cliente_id = ml.cliente_id
+    LEFT JOIN proformas            pf ON pf.cliente_id = ml.cliente_id
+    LEFT JOIN separaciones         sp ON sp.cliente_id = ml.cliente_id
+    LEFT JOIN ventas               vt ON vt.cliente_id = ml.cliente_id
+    LEFT JOIN primer_asesor_dedup  pa ON pa.cliente_id = ml.cliente_id
     ORDER BY ml.fecha_llegada_meta
     """
 
@@ -424,6 +452,10 @@ def extract_lead_details(
             "tiene_proforma":         bool(r[10]),
             "tiene_separacion":       bool(r[11]),
             "tiene_venta":            bool(r[12]),
+            "utm_source":             r[13],
+            "utm_campaign":           r[14],
+            "utm_content":            r[15],
+            "asesor_nombre":          r[16],
         })
 
     return results
