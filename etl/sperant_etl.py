@@ -278,7 +278,8 @@ def extract_lead_details(
             MAX(utm_source)        AS utm_source,
             MAX(utm_campaign)      AS utm_campaign,
             MAX(utm_content)       AS utm_content,
-            MAX(utm_medium)        AS utm_medium
+            MAX(utm_medium)        AS utm_medium,
+            MAX(utm_term)          AS utm_term
         FROM tuna.interacciones
         WHERE codigo_proyecto = '{sperant_code}'
           AND DATE_PART('year',  fecha_creacion) = {year}
@@ -417,6 +418,7 @@ def extract_lead_details(
         ml.utm_campaign,
         ml.utm_content,
         ml.utm_medium,
+        ml.utm_term,
         pa.asesor_nombre
     FROM meta_leads ml
     LEFT JOIN creacion_sperant     cs ON cs.cliente_id = ml.cliente_id
@@ -458,7 +460,8 @@ def extract_lead_details(
             "utm_campaign":           r[14],
             "utm_content":            r[15],
             "utm_medium":             r[16],
-            "asesor_nombre":          r[17],
+            "utm_term":               r[17],
+            "asesor_nombre":          r[18],
         })
 
     return results
