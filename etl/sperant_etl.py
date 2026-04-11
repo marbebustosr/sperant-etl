@@ -219,11 +219,14 @@ def supabase_rpc_upsert_leads(records: list[dict]) -> None:
         batch = records[i : i + batch_size]
         payload = json.dumps({"leads": batch})
         resp = requests.post(url, headers=headers, data=payload, timeout=120)
-        if resp.status_code not in (200, 201):
+        if resp.status_code not in (200, 201, 204):  # 204 = void fn success (RETURNS void)
             log.error("RPC upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
-        result = resp.json()
-        processed = result.get("processed", len(batch)) if isinstance(result, dict) else len(batch)
+        if resp.status_code != 204:
+            result = resp.json()
+            processed = result.get("processed", len(batch)) if isinstance(result, dict) else len(batch)
+        else:
+            processed = len(batch)  # 204 No Content = void fn returned OK
         total_processed += processed
 
     log.info("  ✓ Upserted %d lead rows via RPC", total_processed)
