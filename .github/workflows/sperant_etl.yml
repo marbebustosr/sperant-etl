@@ -2,7 +2,11 @@ name: Sperant → Supabase ETL
 
 on:
   schedule:
-    - cron: "0 11 * * *"   # 6am Lima = 11 UTC
+    - cron: "0 11 * * *" # 6am Lima = 11 UTC
+
+  repository_dispatch:
+    types: [trigger-etl]
+
   workflow_dispatch:
     inputs:
       lookback_months:
@@ -36,7 +40,7 @@ jobs:
           REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          LOOKBACK_MONTHS: ${{ github.event.inputs.lookback_months || '3' }}
+          LOOKBACK_MONTHS: ${{ github.event.client_payload.lookback_months || github.event.inputs.lookback_months || '3' }}
         run: python etl/sperant_etl.py
 
       - name: Notify on failure
@@ -47,7 +51,7 @@ jobs:
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `ETL failed — ${new Date().toISOString().slice(0,10)}`,
-              body: `The Sperant → Supabase ETL failed.\n\nCheck the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              title: `ETL failed`,
+              body: `ETL failed on run ${context.runId}`,
               labels: ['etl-failure']
             })
