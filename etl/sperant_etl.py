@@ -394,7 +394,28 @@ def extract_lead_details(
           AND i.nivel_interes = 'venta'
     ),
 
-    -- 9. First asesor (human user) who interacted with each lead
+    -- 9. Citas agendadas (any cita/appointment interaction)
+    citas_agendadas AS (
+        SELECT DISTINCT i.cliente_id, TRUE AS tiene_cita_agendada
+        FROM tuna.interacciones i
+        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND LOWER(i.tipo_interaccion) LIKE '%cita%'
+    ),
+
+    -- 10. Citas completadas / atendidas
+    citas_completadas AS (
+        SELECT DISTINCT i.cliente_id, TRUE AS tiene_cita_completada
+        FROM tuna.interacciones i
+        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND (LOWER(i.tipo_interaccion) LIKE '%cita%completada%'
+               OR LOWER(i.tipo_interaccion) LIKE '%cita%atendida%'
+               OR LOWER(i.tipo_interaccion) LIKE '%visita%realizada%'
+               OR LOWER(i.tipo_interaccion) LIKE '%cita%realizada%')
+    ),
+
+    -- 11. First asesor (human user) who interacted with each lead
     primer_asesor AS (
         SELECT
             i.cliente_id,
@@ -408,7 +429,7 @@ def extract_lead_details(
           AND i.fecha_creacion  > ml.fecha_llegada_meta
           AND i.nombres_usuario IS NOT NULL
           AND i.nombres_usuario != ''
-          AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento', 'api')
+          AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento')
     ),
     primer_asesor_dedup AS (
         SELECT DISTINCT cliente_id, asesor_nombre FROM primer_asesor
@@ -442,7 +463,9 @@ def extract_lead_details(
         ml.utm_content,
         ml.utm_medium,
         ml.utm_term,
-        pa.asesor_nombre
+        pa.asesor_nombre,
+        COALESCE(ca.tiene_cita_agendada, FALSE)               AS tiene_cita_agendada,
+        COALESCE(cc.tiene_cita_completada, FALSE)             AS tiene_cita_completada
     FROM meta_leads ml
     LEFT JOIN datos_cliente         dc ON dc.cliente_id = ml.cliente_id
     LEFT JOIN creacion_sperant     cs ON cs.cliente_id = ml.cliente_id
@@ -453,6 +476,8 @@ def extract_lead_details(
     LEFT JOIN separaciones         sp ON sp.cliente_id = ml.cliente_id
     LEFT JOIN ventas               vt ON vt.cliente_id = ml.cliente_id
     LEFT JOIN primer_asesor_dedup  pa ON pa.cliente_id = ml.cliente_id
+    LEFT JOIN citas_agendadas      ca ON ca.cliente_id = ml.cliente_id
+    LEFT JOIN citas_completadas    cc ON cc.cliente_id = ml.cliente_id
     ORDER BY ml.fecha_llegada_meta
     """
 
@@ -467,7 +492,7 @@ def extract_lead_details(
         # 8:total_interacciones, 9:nivel_interes, 10:razon_desistimiento,
         # 11:es_desestimado, 12:tiene_proforma, 13:tiene_separacion, 14:tiene_venta,
         # 15:utm_source, 16:utm_campaign, 17:utm_content, 18:utm_medium,
-        # 19:utm_term, 20:asesor_nombre
+        # 19:utm_term, 20:asesor_nombre, 21:tiene_cita_agendada, 22:tiene_cita_completada
 
         # Filter out negative TTL (leads that had interactions before Meta form)
         horas = float(r[7]) if r[7] is not None else None
@@ -496,6 +521,8 @@ def extract_lead_details(
             "utm_medium":             r[18],
             "utm_term":               r[19],
             "asesor_nombre":          r[20],
+            "tiene_cita_agendada":    bool(r[21]),
+            "tiene_cita_completada":  bool(r[22]),
         })
 
     return results
