@@ -367,45 +367,64 @@ def extract_lead_details(
         FROM ultimo_estado
     ),
 
-    -- 6. Proforma flag
+    -- 6. Proforma flag + first proforma timestamp
     proformas AS (
-        SELECT DISTINCT i.cliente_id, TRUE AS tiene_proforma
+        SELECT
+            i.cliente_id,
+            TRUE                        AS tiene_proforma,
+            MIN(i.fecha_creacion)       AS fecha_proforma
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND i.tipo_interaccion = 'creación de proforma'
+        GROUP BY i.cliente_id
     ),
 
-    -- 7. Separacion flag (nivel_interes = 'separación')
+    -- 7. Separacion flag + first separacion timestamp (nivel_interes = 'separación')
     separaciones AS (
-        SELECT DISTINCT i.cliente_id, TRUE AS tiene_separacion
+        SELECT
+            i.cliente_id,
+            TRUE                        AS tiene_separacion,
+            MIN(i.fecha_creacion)       AS fecha_separacion
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND i.nivel_interes = 'separación'
+        GROUP BY i.cliente_id
     ),
 
-    -- 8. Venta flag (nivel_interes = 'venta')
+    -- 8. Venta flag + first venta timestamp (nivel_interes = 'venta')
     ventas AS (
-        SELECT DISTINCT i.cliente_id, TRUE AS tiene_venta
+        SELECT
+            i.cliente_id,
+            TRUE                        AS tiene_venta,
+            MIN(i.fecha_creacion)       AS fecha_venta
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND i.nivel_interes = 'venta'
+        GROUP BY i.cliente_id
     ),
 
-    -- 9. Citas agendadas (any cita/appointment interaction)
+    -- 9. Citas agendadas + first cita agendada timestamp
     citas_agendadas AS (
-        SELECT DISTINCT i.cliente_id, TRUE AS tiene_cita_agendada
+        SELECT
+            i.cliente_id,
+            TRUE                        AS tiene_cita_agendada,
+            MIN(i.fecha_creacion)       AS fecha_cita_agendada
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND LOWER(i.tipo_interaccion) LIKE '%cita%'
+        GROUP BY i.cliente_id
     ),
 
-    -- 10. Citas completadas / atendidas
+    -- 10. Citas completadas / atendidas + first cita completada timestamp
     citas_completadas AS (
-        SELECT DISTINCT i.cliente_id, TRUE AS tiene_cita_completada
+        SELECT
+            i.cliente_id,
+            TRUE                        AS tiene_cita_completada,
+            MIN(i.fecha_creacion)       AS fecha_cita_completada
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
@@ -413,6 +432,7 @@ def extract_lead_details(
                OR LOWER(i.tipo_interaccion) LIKE '%cita%atendida%'
                OR LOWER(i.tipo_interaccion) LIKE '%visita%realizada%'
                OR LOWER(i.tipo_interaccion) LIKE '%cita%realizada%')
+        GROUP BY i.cliente_id
     ),
 
     -- 11. First asesor (human user) who interacted with each lead
@@ -465,7 +485,12 @@ def extract_lead_details(
         ml.utm_term,
         pa.asesor_nombre,
         COALESCE(ca.tiene_cita_agendada, FALSE)               AS tiene_cita_agendada,
-        COALESCE(cc.tiene_cita_completada, FALSE)             AS tiene_cita_completada
+        COALESCE(cc.tiene_cita_completada, FALSE)             AS tiene_cita_completada,
+        pf.fecha_proforma,
+        sp.fecha_separacion,
+        vt.fecha_venta,
+        ca.fecha_cita_agendada,
+        cc.fecha_cita_completada
     FROM meta_leads ml
     LEFT JOIN datos_cliente         dc ON dc.cliente_id = ml.cliente_id
     LEFT JOIN creacion_sperant     cs ON cs.cliente_id = ml.cliente_id
@@ -492,7 +517,9 @@ def extract_lead_details(
         # 8:total_interacciones, 9:nivel_interes, 10:razon_desistimiento,
         # 11:es_desestimado, 12:tiene_proforma, 13:tiene_separacion, 14:tiene_venta,
         # 15:utm_source, 16:utm_campaign, 17:utm_content, 18:utm_medium,
-        # 19:utm_term, 20:asesor_nombre, 21:tiene_cita_agendada, 22:tiene_cita_completada
+        # 19:utm_term, 20:asesor_nombre, 21:tiene_cita_agendada, 22:tiene_cita_completada,
+        # 23:fecha_proforma, 24:fecha_separacion, 25:fecha_venta,
+        # 26:fecha_cita_agendada, 27:fecha_cita_completada
 
         # Filter out negative TTL (leads that had interactions before Meta form)
         horas = float(r[7]) if r[7] is not None else None
@@ -523,6 +550,11 @@ def extract_lead_details(
             "asesor_nombre":          r[20],
             "tiene_cita_agendada":    bool(r[21]),
             "tiene_cita_completada":  bool(r[22]),
+            "fecha_proforma":         r[23].isoformat() if r[23] else None,
+            "fecha_separacion":       r[24].isoformat() if r[24] else None,
+            "fecha_venta":            r[25].isoformat() if r[25] else None,
+            "fecha_cita_agendada":    r[26].isoformat() if r[26] else None,
+            "fecha_cita_completada":  r[27].isoformat() if r[27] else None,
         })
 
     return results
@@ -542,6 +574,8 @@ def compute_kpis(
             "periodo_mes":                 month,
             "total_meta_leads":            0,
             "total_creados":               0,
+            "total_nuevos":                0,
+            "total_recaptados":            0,
             "total_proformas":             0,
             "total_separaciones":          0,
             "total_ventas":                0,
@@ -590,6 +624,29 @@ def compute_kpis(
 
     # Count creados (leads that have fecha_creacion_sperant)
     total_creados  = sum(1 for l in leads if l["fecha_creacion_sperant"])
+
+    # Nuevos vs recaptados:
+    #   nuevos     = lead registered in Sperant within this exact period (year/month)
+    #   recaptados = lead already existed before but had a Meta Ads interaction this period
+    # Constraint: nuevos + recaptados == total_meta_leads
+    def _is_new_this_period(l: dict) -> bool:
+        fcs = l.get("fecha_creacion_sperant")
+        if not fcs:
+            return False
+        # fcs is ISO string from .isoformat(); parse year/month without extra deps
+        try:
+            y = int(fcs[0:4])
+            m = int(fcs[5:7])
+        except (ValueError, TypeError):
+            return False
+        return y == year and m == month
+
+    total_nuevos     = sum(1 for l in leads if _is_new_this_period(l))
+    total_recaptados = n - total_nuevos
+    assert total_nuevos + total_recaptados == n, (
+        f"Invariant broken: nuevos={total_nuevos} + recaptados={total_recaptados} != n={n}"
+    )
+
     total_proformas    = sum(1 for l in leads if l["tiene_proforma"])
     total_separaciones = sum(1 for l in leads if l["tiene_separacion"])
     total_ventas       = sum(1 for l in leads if l["tiene_venta"])
@@ -600,6 +657,8 @@ def compute_kpis(
         "periodo_mes":                 month,
         "total_meta_leads":            n,
         "total_creados":               total_creados,
+        "total_nuevos":                total_nuevos,
+        "total_recaptados":            total_recaptados,
         "total_proformas":             total_proformas,
         "total_separaciones":          total_separaciones,
         "total_ventas":                total_ventas,
