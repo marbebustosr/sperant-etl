@@ -29,6 +29,12 @@ ALTER TABLE sperant_leads
   ADD COLUMN IF NOT EXISTS utm_campaign           VARCHAR(200),
   ADD COLUMN IF NOT EXISTS utm_content            VARCHAR(200),
   ADD COLUMN IF NOT EXISTS asesor_nombre          VARCHAR(200),
+  -- Hito (milestone) timestamps — MIN(fecha_creacion) per event type
+  ADD COLUMN IF NOT EXISTS fecha_proforma         TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS fecha_separacion       TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS fecha_venta            TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS fecha_cita_agendada    TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS fecha_cita_completada  TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS created_at             TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS updated_at             TIMESTAMPTZ DEFAULT NOW();
 
@@ -54,6 +60,8 @@ CREATE TABLE IF NOT EXISTS sperant_kpis (
   -- Funnel counts
   total_meta_leads            INTEGER DEFAULT 0,
   total_creados               INTEGER DEFAULT 0,
+  total_nuevos                INTEGER DEFAULT 0,
+  total_recaptados            INTEGER DEFAULT 0,
   total_proformas             INTEGER DEFAULT 0,
   total_separaciones          INTEGER DEFAULT 0,
   total_ventas                INTEGER DEFAULT 0,
