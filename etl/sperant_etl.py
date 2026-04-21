@@ -559,8 +559,12 @@ def extract_lead_details(
         END                                                                     AS tipo_novedad,
 
         -- subclasificacion: 4-way split
+        --   NUEVO        = primera creación global y en proyecto caen en periodo
+        --   RECAP_MISMO  = ya era cliente de ESTE proyecto antes del periodo
+        --   RECAP_CROSS  = tiene creación de cliente en OTRO proyecto (antes o durante)
+        --   RECAP_SILENT = no hay 'creación de cliente' en ningún proyecto
+        --                  (cliente_id reusado solo por form-fills crudos)
         CASE
-            -- NUEVO
             WHEN pcg.fecha_primera_creacion_global IS NOT NULL
              AND DATE_PART('year',  pcg.fecha_primera_creacion_global) = {year}
              AND DATE_PART('month', pcg.fecha_primera_creacion_global) = {month}
@@ -568,14 +572,11 @@ def extract_lead_details(
              AND DATE_PART('year',  pcp.fecha_primera_creacion_proyecto) = {year}
              AND DATE_PART('month', pcp.fecha_primera_creacion_proyecto) = {month}
             THEN 'NUEVO'
-            -- RECAP_MISMO: ya era cliente de ESTE proyecto antes
             WHEN pcp.fecha_primera_creacion_proyecto IS NOT NULL
-             AND (pcp.fecha_primera_creacion_proyecto < TO_DATE('{year}-{month:02d}-01','YYYY-MM-DD'))
+             AND pcp.fecha_primera_creacion_proyecto < TO_DATE('{year}-{month:02d}-01','YYYY-MM-DD')
             THEN 'RECAP_MISMO'
-            -- RECAP_SILENT: no hay creación de cliente en este proyecto
-            WHEN pcp.fecha_primera_creacion_proyecto IS NULL
+            WHEN pcg.fecha_primera_creacion_global IS NULL
             THEN 'RECAP_SILENT'
-            -- RECAP_CROSS: creación en proyecto dentro del periodo pero global antes
             ELSE 'RECAP_CROSS'
         END                                                                     AS subclasificacion
 
