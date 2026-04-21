@@ -248,105 +248,168 @@ def extract_lead_details(
     cur, sperant_code: str, year: int, month: int, utm_filter: Optional[str]
 ) -> list[dict]:
     """
-    Extract lead-level data for a project+month.
-    Returns one dict per unique lead (documento_cliente).
+    Extract lead-level data for a project+month using the COSECHA model.
 
-    IMPORTANT: utm_filter is applied ONLY to the initial Meta event (step 1)
-    to identify which leads belong to a sub-campaign (e.g. Paraíso within STRN).
-    All subsequent interaction queries use the cliente_id list from step 1 —
-    they must NOT filter by utm_campaign because human interactions (calls,
-    WhatsApp, etc.) never carry utm parameters.
+    Seed universe = first creational touchpoint per cliente_id in this project,
+    within the period, across ALL channels (Meta Ads, Manual, Chat, Sala de
+    Ventas, Feria). Each lead gets classified with:
 
-    Columns returned:
-      sperant_cliente_id, dni, nombre_completo,
-      celular, email,
-      fecha_llegada_meta, fecha_creacion_sperant,
-      horas_primer_contacto, total_interacciones,
-      nivel_interes, razon_desistimiento,
-      es_desestimado, tiene_proforma, tiene_separacion, tiene_venta
+      canal_origen       — META_ADS | MANUAL | CHAT | SALA_VENTAS | FERIA | OTRO
+      tipo_novedad       — NUEVO | RECAPTURADO
+      subclasificacion   — NUEVO | RECAP_MISMO | RECAP_CROSS | RECAP_SILENT
 
-    NOTE: dni is set to NULL when it starts with 'auto-' (Sperant placeholder for
-    leads that arrived from Meta without providing their real document number).
-    The real contact data (celular, email) comes from tuna.clientes via JOIN.
+    Historical Meta form-fill (in any project) still populates
+    fecha_llegada_meta + utm_* when available — this lets us compute TTL and
+    keep Meta attribution even for RECAP_CROSS leads.
+
+    utm_filter (Paraíso sub-campaign) restricts the seed to fblead_ads rows
+    matching the filter; other channels are excluded for such projects.
+
+    dni is NULL when it starts with 'auto-' (Sperant placeholder).
     """
-    # utm filter applies ONLY when identifying which leads arrived (step 1)
     utm_clause = get_utm_clause(utm_filter)
+
+    # For utm-filtered projects (e.g. Paraíso within STRN), the seed must only
+    # include Meta rows matching the campaign — non-Meta channels cannot be
+    # attributed to the sub-campaign, so we exclude them.
+    if utm_filter:
+        seed_where = f"""
+              i.origen = 'fblead_ads'
+          AND i.tipo_interaccion IN ('facebook','creación de cliente')
+          {utm_clause.replace('utm_campaign', 'i.utm_campaign')}
+        """
+    else:
+        seed_where = """
+              (
+                 (i.origen = 'fblead_ads' AND i.tipo_interaccion IN ('facebook','creación de cliente'))
+              OR (i.origen = 'manual'     AND i.tipo_interaccion = 'creación de cliente')
+              OR (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
+              OR i.tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
+              )
+        """
 
     query = f"""
     WITH
 
-    -- 1. Leads that arrived via Facebook Ads in this period
-    --    (utm_filter here isolates the sub-campaign, e.g. Paraíso within STRN)
-    meta_leads AS (
+    -- 1. Cosecha = first creational touchpoint per cliente_id in THIS project.
+    --    Redshift has no DISTINCT ON, use ROW_NUMBER.
+    cosecha_ranked AS (
         SELECT
-            cliente_id,
-            documento_cliente,
-            MAX(nombres_cliente)   AS nombres,
-            MAX(apellidos_cliente) AS apellidos,
-            MIN(fecha_creacion)    AS fecha_llegada_meta,
-            MAX(utm_source)        AS utm_source,
-            MAX(utm_campaign)      AS utm_campaign,
-            MAX(utm_content)       AS utm_content,
-            MAX(utm_medium)        AS utm_medium,
-            MAX(utm_term)          AS utm_term
-        FROM tuna.interacciones
-        WHERE codigo_proyecto = '{sperant_code}'
+            i.cliente_id,
+            i.documento_cliente,
+            i.nombres_cliente,
+            i.apellidos_cliente,
+            i.fecha_creacion,
+            i.origen,
+            i.tipo_interaccion,
+            i.nombres_usuario,
+            i.utm_source, i.utm_campaign, i.utm_content, i.utm_medium, i.utm_term,
+            ROW_NUMBER() OVER (
+                PARTITION BY i.cliente_id
+                ORDER BY i.fecha_creacion ASC
+            ) AS rn
+        FROM tuna.interacciones i
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND ({seed_where})
+    ),
+    cosecha_periodo AS (
+        SELECT *
+        FROM cosecha_ranked
+        WHERE rn = 1
           AND DATE_PART('year',  fecha_creacion) = {year}
           AND DATE_PART('month', fecha_creacion) = {month}
-          AND origen           = 'fblead_ads'
-          AND tipo_interaccion = 'facebook'
-          {utm_clause}
-        GROUP BY cliente_id, documento_cliente
     ),
 
-    -- 2. Contact data from tuna.clientes (phone, email — not in interacciones)
+    -- 2. First Meta form fill GLOBAL (any project) — gives fecha_llegada_meta
+    --    + utm_* even for RECAP_CROSS leads.
+    primer_meta_global AS (
+        SELECT
+            i.cliente_id,
+            MIN(i.fecha_creacion)                     AS fecha_llegada_meta,
+            MAX(i.utm_source)                         AS utm_source,
+            MAX(i.utm_campaign)                       AS utm_campaign,
+            MAX(i.utm_content)                        AS utm_content,
+            MAX(i.utm_medium)                         AS utm_medium,
+            MAX(i.utm_term)                           AS utm_term
+        FROM tuna.interacciones i
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.origen = 'fblead_ads'
+          AND i.tipo_interaccion = 'facebook'
+        GROUP BY i.cliente_id
+    ),
+
+    -- 3. First 'creación de cliente' GLOBAL (any project) — anchors tipo_novedad.
+    primera_creacion_global AS (
+        SELECT
+            i.cliente_id,
+            MIN(i.fecha_creacion) AS fecha_primera_creacion_global
+        FROM tuna.interacciones i
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.tipo_interaccion = 'creación de cliente'
+        GROUP BY i.cliente_id
+    ),
+
+    -- 4. First 'creación de cliente' in THIS project — anchors subclasificacion.
+    primera_creacion_proyecto AS (
+        SELECT
+            i.cliente_id,
+            MIN(i.fecha_creacion) AS fecha_primera_creacion_proyecto
+        FROM tuna.interacciones i
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND i.tipo_interaccion = 'creación de cliente'
+        GROUP BY i.cliente_id
+    ),
+
+    -- 5. Contact data (phone, email) from tuna.clientes.
     datos_cliente AS (
         SELECT
             c.id              AS cliente_id,
             COALESCE(NULLIF(TRIM(c.celulares), ''), NULLIF(TRIM(c.telefono), '')) AS celular,
             NULLIF(TRIM(c.email), '')                                              AS email
         FROM tuna.clientes c
-        INNER JOIN meta_leads ml ON ml.cliente_id = c.id
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = c.id
     ),
 
-    -- 3. First formal CRM registration for these leads (no utm filter — registration
-    --    events never carry utm_campaign)
+    -- 6. First formal CRM registration in this project (for fecha_creacion_sperant).
     creacion_sperant AS (
         SELECT
             i.cliente_id,
             MIN(i.fecha_creacion) AS fecha_creacion_sperant
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto    = '{sperant_code}'
-          AND i.tipo_interaccion   = 'creación de cliente'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto  = '{sperant_code}'
+          AND i.tipo_interaccion = 'creación de cliente'
         GROUP BY i.cliente_id
     ),
 
-    -- 4. First HUMAN interaction after Meta arrival (excludes bot events)
+    -- 7. First HUMAN interaction after Meta arrival (for TTL calc).
     primera_humana AS (
         SELECT
             i.cliente_id,
             MIN(i.fecha_creacion) AS fecha_primera_humana
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        LEFT JOIN primer_meta_global pmg ON pmg.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
-          AND i.fecha_creacion  > ml.fecha_llegada_meta
+          AND pmg.fecha_llegada_meta IS NOT NULL
+          AND i.fecha_creacion  > pmg.fecha_llegada_meta
           AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento', 'api')
         GROUP BY i.cliente_id
     ),
 
-    -- 4. Total interactions per lead (all time, for context)
+    -- 8. Total interactions per lead in this project.
     total_ints AS (
         SELECT
             i.cliente_id,
             COUNT(*) AS total_interacciones
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
         GROUP BY i.cliente_id
     ),
 
-    -- 5. Latest nivel_interes and razon_desistimiento per lead
+    -- 9. Latest nivel_interes and razon_desistimiento.
     ultimo_estado AS (
         SELECT
             i.cliente_id,
@@ -359,7 +422,7 @@ def extract_lead_details(
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
                 ) AS razon_desistimiento
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
     ),
     ultimo_estado_dedup AS (
@@ -367,72 +430,44 @@ def extract_lead_details(
         FROM ultimo_estado
     ),
 
-    -- 6. Proforma flag + first proforma timestamp
+    -- 10. Hito flags.
     proformas AS (
-        SELECT
-            i.cliente_id,
-            TRUE                        AS tiene_proforma,
-            MIN(i.fecha_creacion)       AS fecha_proforma
+        SELECT i.cliente_id, TRUE AS tiene_proforma, MIN(i.fecha_creacion) AS fecha_proforma
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto = '{sperant_code}'
-          AND i.tipo_interaccion = 'creación de proforma'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}' AND i.tipo_interaccion = 'creación de proforma'
         GROUP BY i.cliente_id
     ),
-
-    -- 7. Separacion flag + first separacion timestamp (nivel_interes = 'separación')
     separaciones AS (
-        SELECT
-            i.cliente_id,
-            TRUE                        AS tiene_separacion,
-            MIN(i.fecha_creacion)       AS fecha_separacion
+        SELECT i.cliente_id, TRUE AS tiene_separacion, MIN(i.fecha_creacion) AS fecha_separacion
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto = '{sperant_code}'
-          AND i.nivel_interes = 'separación'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}' AND i.nivel_interes = 'separación'
         GROUP BY i.cliente_id
     ),
-
-    -- 8. Venta flag + first venta timestamp (nivel_interes = 'venta')
     ventas AS (
-        SELECT
-            i.cliente_id,
-            TRUE                        AS tiene_venta,
-            MIN(i.fecha_creacion)       AS fecha_venta
+        SELECT i.cliente_id, TRUE AS tiene_venta, MIN(i.fecha_creacion) AS fecha_venta
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto = '{sperant_code}'
-          AND i.nivel_interes = 'venta'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}' AND i.nivel_interes = 'venta'
         GROUP BY i.cliente_id
     ),
-
-    -- 9. Citas agendadas + first cita agendada timestamp
     citas_agendadas AS (
-        SELECT
-            i.cliente_id,
-            TRUE                        AS tiene_cita_agendada,
-            MIN(i.fecha_creacion)       AS fecha_cita_agendada
+        SELECT i.cliente_id, TRUE AS tiene_cita_agendada, MIN(i.fecha_creacion) AS fecha_cita_agendada
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto = '{sperant_code}'
-          AND LOWER(i.nivel_interes) = 'cita agendada'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}' AND LOWER(i.nivel_interes) = 'cita agendada'
         GROUP BY i.cliente_id
     ),
-
-    -- 10. Citas completadas / atendidas + first cita completada timestamp
     citas_completadas AS (
-        SELECT
-            i.cliente_id,
-            TRUE                        AS tiene_cita_completada,
-            MIN(i.fecha_creacion)       AS fecha_cita_completada
+        SELECT i.cliente_id, TRUE AS tiene_cita_completada, MIN(i.fecha_creacion) AS fecha_cita_completada
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
-        WHERE i.codigo_proyecto = '{sperant_code}'
-          AND LOWER(i.tipo_interaccion) = 'visita al proyecto'
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}' AND LOWER(i.tipo_interaccion) = 'visita al proyecto'
         GROUP BY i.cliente_id
     ),
 
-    -- 11. First asesor (human user) who interacted with each lead
+    -- 11. First asesor after Meta arrival (falls back to first human in project if no Meta).
     primer_asesor AS (
         SELECT
             i.cliente_id,
@@ -441,9 +476,8 @@ def extract_lead_details(
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
                 ) AS asesor_nombre
         FROM tuna.interacciones i
-        INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
-          AND i.fecha_creacion  > ml.fecha_llegada_meta
           AND i.nombres_usuario IS NOT NULL
           AND i.nombres_usuario != ''
           AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento')
@@ -452,106 +486,172 @@ def extract_lead_details(
         SELECT DISTINCT cliente_id, asesor_nombre FROM primer_asesor
     )
 
-    -- Final join
+    -- Final projection with classifiers.
     SELECT
-        ml.cliente_id                                           AS sperant_cliente_id,
-        -- dni: NULL when auto-generated by Sperant (placeholder for leads without real DNI)
-        CASE WHEN ml.documento_cliente LIKE 'auto-%' THEN NULL
-             ELSE ml.documento_cliente END                      AS dni,
-        TRIM(COALESCE(ml.nombres,'') || ' ' || COALESCE(ml.apellidos,'')) AS nombre_completo,
+        cp.cliente_id                                           AS sperant_cliente_id,
+        CASE WHEN cp.documento_cliente LIKE 'auto-%' THEN NULL
+             ELSE cp.documento_cliente END                      AS dni,
+        TRIM(COALESCE(cp.nombres_cliente,'') || ' ' || COALESCE(cp.apellidos_cliente,'')) AS nombre_completo,
         dc.celular,
         dc.email,
-        ml.fecha_llegada_meta,
+
+        -- Fecha Meta arrival (any project, historical)
+        pmg.fecha_llegada_meta,
+
+        -- Fecha cosecha (first touchpoint in THIS project within period)
+        cp.fecha_creacion AS fecha_cosecha,
+
+        -- Fecha formal Sperant creation in this project
         cs.fecha_creacion_sperant,
+
+        -- TTL from Meta form → first human, only if Meta exists
         CASE
-            WHEN ph.fecha_primera_humana IS NOT NULL
-            THEN CAST(DATEDIFF('minute', ml.fecha_llegada_meta, ph.fecha_primera_humana) AS FLOAT) / 60.0
+            WHEN pmg.fecha_llegada_meta IS NOT NULL AND ph.fecha_primera_humana IS NOT NULL
+            THEN CAST(DATEDIFF('minute', pmg.fecha_llegada_meta, ph.fecha_primera_humana) AS FLOAT) / 60.0
             ELSE NULL
         END                                                     AS horas_primer_contacto,
-        COALESCE(ti.total_interacciones, 0)                    AS total_interacciones,
+
+        COALESCE(ti.total_interacciones, 0)                     AS total_interacciones,
         ue.nivel_interes,
         ue.razon_desistimiento,
         CASE WHEN ue.nivel_interes = 'desestimado' THEN TRUE ELSE FALSE END AS es_desestimado,
-        COALESCE(pf.tiene_proforma,  FALSE)                    AS tiene_proforma,
-        COALESCE(sp.tiene_separacion, FALSE)                   AS tiene_separacion,
-        COALESCE(vt.tiene_venta,     FALSE)                    AS tiene_venta,
-        ml.utm_source,
-        ml.utm_campaign,
-        ml.utm_content,
-        ml.utm_medium,
-        ml.utm_term,
+        COALESCE(pf.tiene_proforma,  FALSE)                     AS tiene_proforma,
+        COALESCE(sp.tiene_separacion, FALSE)                    AS tiene_separacion,
+        COALESCE(vt.tiene_venta,     FALSE)                     AS tiene_venta,
+        COALESCE(ca.tiene_cita_agendada, FALSE)                 AS tiene_cita_agendada,
+        COALESCE(cc.tiene_cita_completada, FALSE)               AS tiene_cita_completada,
+
+        -- UTM: prefer cosecha row if it's Meta, else fall back to global Meta
+        COALESCE(cp.utm_source,   pmg.utm_source)               AS utm_source,
+        COALESCE(cp.utm_campaign, pmg.utm_campaign)             AS utm_campaign,
+        COALESCE(cp.utm_content,  pmg.utm_content)              AS utm_content,
+        COALESCE(cp.utm_medium,   pmg.utm_medium)               AS utm_medium,
+        COALESCE(cp.utm_term,     pmg.utm_term)                 AS utm_term,
+
         pa.asesor_nombre,
-        COALESCE(ca.tiene_cita_agendada, FALSE)               AS tiene_cita_agendada,
-        COALESCE(cc.tiene_cita_completada, FALSE)             AS tiene_cita_completada,
+
         pf.fecha_proforma,
         sp.fecha_separacion,
         vt.fecha_venta,
         ca.fecha_cita_agendada,
-        cc.fecha_cita_completada
-    FROM meta_leads ml
-    LEFT JOIN datos_cliente         dc ON dc.cliente_id = ml.cliente_id
-    LEFT JOIN creacion_sperant     cs ON cs.cliente_id = ml.cliente_id
-    LEFT JOIN primera_humana       ph ON ph.cliente_id = ml.cliente_id
-    LEFT JOIN total_ints           ti ON ti.cliente_id = ml.cliente_id
-    LEFT JOIN ultimo_estado_dedup  ue ON ue.cliente_id = ml.cliente_id
-    LEFT JOIN proformas            pf ON pf.cliente_id = ml.cliente_id
-    LEFT JOIN separaciones         sp ON sp.cliente_id = ml.cliente_id
-    LEFT JOIN ventas               vt ON vt.cliente_id = ml.cliente_id
-    LEFT JOIN primer_asesor_dedup  pa ON pa.cliente_id = ml.cliente_id
-    LEFT JOIN citas_agendadas      ca ON ca.cliente_id = ml.cliente_id
-    LEFT JOIN citas_completadas    cc ON cc.cliente_id = ml.cliente_id
-    ORDER BY ml.fecha_llegada_meta
+        cc.fecha_cita_completada,
+
+        -- canal_origen from the cosecha row
+        CASE
+            WHEN cp.origen = 'fblead_ads'                                       THEN 'META_ADS'
+            WHEN cp.origen = 'manual'       AND cp.tipo_interaccion = 'creación de cliente' THEN 'MANUAL'
+            WHEN cp.origen = 'sperant_chat' AND cp.tipo_interaccion = 'creación de cliente' THEN 'CHAT'
+            WHEN cp.tipo_interaccion IN ('visita al proyecto','visita a oficinas')          THEN 'SALA_VENTAS'
+            WHEN cp.tipo_interaccion = 'visita a feria'                          THEN 'FERIA'
+            ELSE 'OTRO'
+        END                                                                     AS canal_origen,
+
+        -- tipo_novedad: NUEVO only if primera creación global AND en proyecto caen en periodo
+        CASE
+            WHEN pcg.fecha_primera_creacion_global IS NOT NULL
+             AND DATE_PART('year',  pcg.fecha_primera_creacion_global) = {year}
+             AND DATE_PART('month', pcg.fecha_primera_creacion_global) = {month}
+             AND pcp.fecha_primera_creacion_proyecto IS NOT NULL
+             AND DATE_PART('year',  pcp.fecha_primera_creacion_proyecto) = {year}
+             AND DATE_PART('month', pcp.fecha_primera_creacion_proyecto) = {month}
+            THEN 'NUEVO'
+            ELSE 'RECAPTURADO'
+        END                                                                     AS tipo_novedad,
+
+        -- subclasificacion: 4-way split
+        CASE
+            -- NUEVO
+            WHEN pcg.fecha_primera_creacion_global IS NOT NULL
+             AND DATE_PART('year',  pcg.fecha_primera_creacion_global) = {year}
+             AND DATE_PART('month', pcg.fecha_primera_creacion_global) = {month}
+             AND pcp.fecha_primera_creacion_proyecto IS NOT NULL
+             AND DATE_PART('year',  pcp.fecha_primera_creacion_proyecto) = {year}
+             AND DATE_PART('month', pcp.fecha_primera_creacion_proyecto) = {month}
+            THEN 'NUEVO'
+            -- RECAP_MISMO: ya era cliente de ESTE proyecto antes
+            WHEN pcp.fecha_primera_creacion_proyecto IS NOT NULL
+             AND (pcp.fecha_primera_creacion_proyecto < TO_DATE('{year}-{month:02d}-01','YYYY-MM-DD'))
+            THEN 'RECAP_MISMO'
+            -- RECAP_SILENT: no hay creación de cliente en este proyecto
+            WHEN pcp.fecha_primera_creacion_proyecto IS NULL
+            THEN 'RECAP_SILENT'
+            -- RECAP_CROSS: creación en proyecto dentro del periodo pero global antes
+            ELSE 'RECAP_CROSS'
+        END                                                                     AS subclasificacion
+
+    FROM cosecha_periodo cp
+    LEFT JOIN datos_cliente              dc  ON dc.cliente_id  = cp.cliente_id
+    LEFT JOIN primer_meta_global         pmg ON pmg.cliente_id = cp.cliente_id
+    LEFT JOIN primera_creacion_global    pcg ON pcg.cliente_id = cp.cliente_id
+    LEFT JOIN primera_creacion_proyecto  pcp ON pcp.cliente_id = cp.cliente_id
+    LEFT JOIN creacion_sperant           cs  ON cs.cliente_id  = cp.cliente_id
+    LEFT JOIN primera_humana             ph  ON ph.cliente_id  = cp.cliente_id
+    LEFT JOIN total_ints                 ti  ON ti.cliente_id  = cp.cliente_id
+    LEFT JOIN ultimo_estado_dedup        ue  ON ue.cliente_id  = cp.cliente_id
+    LEFT JOIN proformas                  pf  ON pf.cliente_id  = cp.cliente_id
+    LEFT JOIN separaciones               sp  ON sp.cliente_id  = cp.cliente_id
+    LEFT JOIN ventas                     vt  ON vt.cliente_id  = cp.cliente_id
+    LEFT JOIN primer_asesor_dedup        pa  ON pa.cliente_id  = cp.cliente_id
+    LEFT JOIN citas_agendadas            ca  ON ca.cliente_id  = cp.cliente_id
+    LEFT JOIN citas_completadas          cc  ON cc.cliente_id  = cp.cliente_id
+    ORDER BY cp.fecha_creacion
     """
 
     cur.execute(query)
     rows = cur.fetchall()
 
     results = []
+    # Column order from SELECT (28 cols):
+    #  0 sperant_cliente_id  1 dni                 2 nombre_completo
+    #  3 celular             4 email
+    #  5 fecha_llegada_meta  6 fecha_cosecha       7 fecha_creacion_sperant
+    #  8 horas_primer_contacto   9 total_interacciones
+    # 10 nivel_interes      11 razon_desistimiento 12 es_desestimado
+    # 13 tiene_proforma     14 tiene_separacion    15 tiene_venta
+    # 16 tiene_cita_agendada 17 tiene_cita_completada
+    # 18 utm_source 19 utm_campaign 20 utm_content 21 utm_medium 22 utm_term
+    # 23 asesor_nombre
+    # 24 fecha_proforma 25 fecha_separacion 26 fecha_venta
+    # 27 fecha_cita_agendada 28 fecha_cita_completada
+    # 29 canal_origen 30 tipo_novedad 31 subclasificacion
     for r in rows:
-        # Column order from SELECT:
-        # 0:sperant_cliente_id, 1:dni, 2:nombre_completo, 3:celular, 4:email,
-        # 5:fecha_llegada_meta, 6:fecha_creacion_sperant, 7:horas_primer_contacto,
-        # 8:total_interacciones, 9:nivel_interes, 10:razon_desistimiento,
-        # 11:es_desestimado, 12:tiene_proforma, 13:tiene_separacion, 14:tiene_venta,
-        # 15:utm_source, 16:utm_campaign, 17:utm_content, 18:utm_medium,
-        # 19:utm_term, 20:asesor_nombre, 21:tiene_cita_agendada, 22:tiene_cita_completada,
-        # 23:fecha_proforma, 24:fecha_separacion, 25:fecha_venta,
-        # 26:fecha_cita_agendada, 27:fecha_cita_completada
-
-        # Filter out negative TTL (leads that had interactions before Meta form)
-        horas = float(r[7]) if r[7] is not None else None
+        horas = float(r[8]) if r[8] is not None else None
         if horas is not None and horas < 0:
             horas = None
 
         results.append({
             "sperant_cliente_id":     int(r[0]) if r[0] else None,
-            "dni":                    r[1],           # NULL if auto-generated
+            "dni":                    r[1],
             "nombre_completo":        r[2],
-            "celular":                r[3],            # from tuna.clientes
-            "email":                  r[4],            # from tuna.clientes
+            "celular":                r[3],
+            "email":                  r[4],
             "fecha_llegada_meta":     r[5].isoformat() if r[5] else None,
-            "fecha_creacion_sperant": r[6].isoformat() if r[6] else None,
+            "fecha_cosecha":          r[6].isoformat() if r[6] else None,
+            "fecha_creacion_sperant": r[7].isoformat() if r[7] else None,
             "horas_primer_contacto":  horas,
-            "total_interacciones":    int(r[8]) if r[8] else 0,
-            "nivel_interes":          r[9],
-            "razon_desistimiento":    r[10],
-            "es_desestimado":         bool(r[11]),
-            "tiene_proforma":         bool(r[12]),
-            "tiene_separacion":       bool(r[13]),
-            "tiene_venta":            bool(r[14]),
-            "utm_source":             r[15],
-            "utm_campaign":           r[16],
-            "utm_content":            r[17],
-            "utm_medium":             r[18],
-            "utm_term":               r[19],
-            "asesor_nombre":          r[20],
-            "tiene_cita_agendada":    bool(r[21]),
-            "tiene_cita_completada":  bool(r[22]),
-            "fecha_proforma":         r[23].isoformat() if r[23] else None,
-            "fecha_separacion":       r[24].isoformat() if r[24] else None,
-            "fecha_venta":            r[25].isoformat() if r[25] else None,
-            "fecha_cita_agendada":    r[26].isoformat() if r[26] else None,
-            "fecha_cita_completada":  r[27].isoformat() if r[27] else None,
+            "total_interacciones":    int(r[9]) if r[9] else 0,
+            "nivel_interes":          r[10],
+            "razon_desistimiento":    r[11],
+            "es_desestimado":         bool(r[12]),
+            "tiene_proforma":         bool(r[13]),
+            "tiene_separacion":       bool(r[14]),
+            "tiene_venta":            bool(r[15]),
+            "tiene_cita_agendada":    bool(r[16]),
+            "tiene_cita_completada":  bool(r[17]),
+            "utm_source":             r[18],
+            "utm_campaign":           r[19],
+            "utm_content":            r[20],
+            "utm_medium":             r[21],
+            "utm_term":               r[22],
+            "asesor_nombre":          r[23],
+            "fecha_proforma":         r[24].isoformat() if r[24] else None,
+            "fecha_separacion":       r[25].isoformat() if r[25] else None,
+            "fecha_venta":            r[26].isoformat() if r[26] else None,
+            "fecha_cita_agendada":    r[27].isoformat() if r[27] else None,
+            "fecha_cita_completada":  r[28].isoformat() if r[28] else None,
+            "canal_origen":           r[29],
+            "tipo_novedad":           r[30],
+            "subclasificacion":       r[31],
         })
 
     return results
@@ -585,6 +685,8 @@ def compute_kpis(
             "pct_desestimados":            None,
             "distribucion_nivel_interes":  None,
             "distribucion_desistimiento":  None,
+            "distribucion_canal_origen":   None,
+            "distribucion_subclasificacion": None,
             "updated_at":                  datetime.now(timezone.utc).isoformat(),
         }
 
@@ -622,27 +724,24 @@ def compute_kpis(
     # Count creados (leads that have fecha_creacion_sperant)
     total_creados  = sum(1 for l in leads if l["fecha_creacion_sperant"])
 
-    # Nuevos vs recaptados:
-    #   nuevos     = lead registered in Sperant within this exact period (year/month)
-    #   recaptados = lead already existed before but had a Meta Ads interaction this period
-    # Constraint: nuevos + recaptados == total_meta_leads
-    def _is_new_this_period(l: dict) -> bool:
-        fcs = l.get("fecha_creacion_sperant")
-        if not fcs:
-            return False
-        # fcs is ISO string from .isoformat(); parse year/month without extra deps
-        try:
-            y = int(fcs[0:4])
-            m = int(fcs[5:7])
-        except (ValueError, TypeError):
-            return False
-        return y == year and m == month
-
-    total_nuevos     = sum(1 for l in leads if _is_new_this_period(l))
-    total_recaptados = n - total_nuevos
+    # Nuevos vs recaptados: driven by tipo_novedad classifier (set by Redshift query).
+    total_nuevos     = sum(1 for l in leads if l.get("tipo_novedad") == "NUEVO")
+    total_recaptados = sum(1 for l in leads if l.get("tipo_novedad") == "RECAPTURADO")
     assert total_nuevos + total_recaptados == n, (
         f"Invariant broken: nuevos={total_nuevos} + recaptados={total_recaptados} != n={n}"
     )
+
+    # Canal origen distribution
+    canal_dist: dict[str, int] = {}
+    for l in leads:
+        c = l.get("canal_origen") or "OTRO"
+        canal_dist[c] = canal_dist.get(c, 0) + 1
+
+    # Subclasificacion distribution
+    subclas_dist: dict[str, int] = {}
+    for l in leads:
+        s = l.get("subclasificacion") or "OTRO"
+        subclas_dist[s] = subclas_dist.get(s, 0) + 1
 
     total_proformas    = sum(1 for l in leads if l["tiene_proforma"])
     total_separaciones = sum(1 for l in leads if l["tiene_separacion"])
@@ -668,6 +767,8 @@ def compute_kpis(
         "pct_desestimados":            pct_desest,
         "distribucion_nivel_interes":  json.dumps(nivel_dist),
         "distribucion_desistimiento":  json.dumps(desist_dist) if desist_dist else None,
+        "distribucion_canal_origen":   json.dumps(canal_dist),
+        "distribucion_subclasificacion": json.dumps(subclas_dist),
         "updated_at":                  datetime.now(timezone.utc).isoformat(),
     }
 
