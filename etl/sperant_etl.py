@@ -415,7 +415,7 @@ def extract_lead_details(
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
-          AND LOWER(i.tipo_interaccion) LIKE '%cita%'
+          AND LOWER(i.nivel_interes) = 'cita agendada'
         GROUP BY i.cliente_id
     ),
 
@@ -428,10 +428,7 @@ def extract_lead_details(
         FROM tuna.interacciones i
         INNER JOIN meta_leads ml ON ml.cliente_id = i.cliente_id
         WHERE i.codigo_proyecto = '{sperant_code}'
-          AND (LOWER(i.tipo_interaccion) LIKE '%cita%completada%'
-               OR LOWER(i.tipo_interaccion) LIKE '%cita%atendida%'
-               OR LOWER(i.tipo_interaccion) LIKE '%visita%realizada%'
-               OR LOWER(i.tipo_interaccion) LIKE '%cita%realizada%')
+          AND LOWER(i.tipo_interaccion) = 'visita al proyecto'
         GROUP BY i.cliente_id
     ),
 
