@@ -833,6 +833,32 @@ def run_etl():
     cur = conn.cursor()
     log.info("Connected.")
 
+    # ── DIAGNOSTIC 2: check tuna.clientes + interactions for the 11 missing-asesor leads ──
+    TARGET_EMAILS = [
+        'hmijail.sv@gmail.com', 'luisafernandabustosmedina@gmail.com',
+        'sayurikimurasol77@gmail.com', 'angns.00@gmail.com',
+        'E.huayane12@gmail.com', 'Alvaroduclos15@gmail.com',
+        'schelsyangie@gmail.com', 'marielvia01@gmail.com',
+        'Acmariapaz399@gmail.com', 'david_jandro_9@hotmail.com',
+        'mfalburqueque@gmail.com',
+    ]
+    email_list = ", ".join(f"'{e.lower()}'" for e in TARGET_EMAILS)
+    cur.execute(f"""
+        SELECT c.id, c.nombres, c.apellidos, c.email,
+               c.ultimo_vendedor, c.usuario_creador, c.username
+        FROM tuna.clientes c
+        WHERE LOWER(TRIM(c.email)) IN ({email_list})
+    """)
+    log.info("=== DIAG2 tuna.clientes for 11 leads: %s ===", cur.fetchall())
+
+    # Also check all tuna schema tables
+    cur.execute("""
+        SELECT DISTINCT table_name FROM information_schema.tables
+        WHERE table_schema = 'tuna' ORDER BY 1
+    """)
+    log.info("=== DIAG2 tuna tables: %s ===", [r[0] for r in cur.fetchall()])
+    # ─────────────────────────────────────────────────────────────────────────
+
     all_leads_rows  = []
     all_kpis_rows   = []
 
