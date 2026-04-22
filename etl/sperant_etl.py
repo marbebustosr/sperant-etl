@@ -468,6 +468,11 @@ def extract_lead_details(
     ),
 
     -- 11. First asesor after Meta arrival (falls back to first human in project if no Meta).
+    --     Exclude the sperant_chat 'creación de cliente' row: that event is created
+    --     automatically by the chat widget and stores the agent's login username
+    --     (e.g. 'eflores') instead of their display name.  Subsequent human
+    --     interactions (calls, WhatsApp, etc.) correctly populate nombres_usuario
+    --     with the full name, so we skip to those.
     primer_asesor AS (
         SELECT
             i.cliente_id,
@@ -481,6 +486,7 @@ def extract_lead_details(
           AND i.nombres_usuario IS NOT NULL
           AND i.nombres_usuario != ''
           AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento')
+          AND NOT (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
     ),
     primer_asesor_dedup AS (
         SELECT DISTINCT cliente_id, asesor_nombre FROM primer_asesor
