@@ -361,12 +361,16 @@ def extract_lead_details(
         GROUP BY i.cliente_id
     ),
 
-    -- 5. Contact data (phone, email) from tuna.clientes.
+    -- 5. Contact data (phone, email, ultimo_vendedor) from tuna.clientes.
+    --    ultimo_vendedor is the asesor Sperant shows on the client card — used as
+    --    fallback when no interaction-derived asesor is found (e.g. fresh Meta leads
+    --    whose 'creación de cliente' row has nombres_usuario = NULL).
     datos_cliente AS (
         SELECT
             c.id              AS cliente_id,
             COALESCE(NULLIF(TRIM(c.celulares), ''), NULLIF(TRIM(c.telefono), '')) AS celular,
-            NULLIF(TRIM(c.email), '')                                              AS email
+            NULLIF(TRIM(c.email), '')                                              AS email,
+            NULLIF(TRIM(c.ultimo_vendedor), '')                                   AS ultimo_vendedor
         FROM tuna.clientes c
         INNER JOIN cosecha_periodo cp ON cp.cliente_id = c.id
     ),
@@ -538,7 +542,9 @@ def extract_lead_details(
         COALESCE(cp.utm_medium,   pmg.utm_medium)               AS utm_medium,
         COALESCE(cp.utm_term,     pmg.utm_term)                 AS utm_term,
 
-        pa.asesor_nombre,
+        -- Asesor: prefer interaction-derived name; fall back to tuna.clientes.ultimo_vendedor
+        -- (covers fresh Meta leads where 'creación de cliente' has nombres_usuario = NULL)
+        COALESCE(pa.asesor_nombre, dc.ultimo_vendedor) AS asesor_nombre,
 
         pf.fecha_proforma,
         sp.fecha_separacion,
@@ -826,44 +832,6 @@ def run_etl():
     conn = redshift_connect()
     cur = conn.cursor()
     log.info("Connected.")
-
-    # ── DIAGNOSTIC: schema + sample data for leads without asesor ─────────────
-    log.info("=== DIAGNOSTIC START ===")
-    # 1. Columns of tuna.clientes
-    cur.execute("""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = 'tuna' AND table_name = 'clientes'
-        ORDER BY ordinal_position
-    """)
-    log.info("tuna.clientes columns: %s", [r[0] for r in cur.fetchall()])
-
-    # 2. Distinct tipo_interaccion + origen combos for MELGAR April 2026
-    cur.execute("""
-        SELECT DISTINCT tipo_interaccion, origen, nombres_usuario IS NOT NULL AS has_user
-        FROM tuna.interacciones
-        WHERE codigo_proyecto = 'MELGAR'
-          AND DATE_PART('year',  fecha_creacion) = 2026
-          AND DATE_PART('month', fecha_creacion) = 4
-        ORDER BY 1, 2
-        LIMIT 60
-    """)
-    log.info("MELGAR Apr-2026 tipo_interaccion × origen × has_user: %s", cur.fetchall())
-
-    # 3. Sample of leads where nombres_usuario IS NULL across all interactions
-    cur.execute("""
-        SELECT i.cliente_id, i.tipo_interaccion, i.origen, i.nombres_usuario, i.fecha_creacion
-        FROM tuna.interacciones i
-        WHERE i.codigo_proyecto = 'MELGAR'
-          AND DATE_PART('year',  i.fecha_creacion) = 2026
-          AND DATE_PART('month', i.fecha_creacion) = 4
-          AND i.tipo_interaccion NOT IN ('facebook','creacion de evento')
-        ORDER BY i.cliente_id, i.fecha_creacion
-        LIMIT 80
-    """)
-    log.info("MELGAR Apr-2026 non-fb interactions sample: %s", cur.fetchall())
-    log.info("=== DIAGNOSTIC END ===")
-    # ──────────────────────────────────────────────────────────────────────────
 
     all_leads_rows  = []
     all_kpis_rows   = []
