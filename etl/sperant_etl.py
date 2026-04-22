@@ -827,6 +827,44 @@ def run_etl():
     cur = conn.cursor()
     log.info("Connected.")
 
+    # ── DIAGNOSTIC: schema + sample data for leads without asesor ─────────────
+    log.info("=== DIAGNOSTIC START ===")
+    # 1. Columns of tuna.clientes
+    cur.execute("""
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'tuna' AND table_name = 'clientes'
+        ORDER BY ordinal_position
+    """)
+    log.info("tuna.clientes columns: %s", [r[0] for r in cur.fetchall()])
+
+    # 2. Distinct tipo_interaccion + origen combos for MELGAR April 2026
+    cur.execute("""
+        SELECT DISTINCT tipo_interaccion, origen, nombres_usuario IS NOT NULL AS has_user
+        FROM tuna.interacciones
+        WHERE codigo_proyecto = 'MELGAR'
+          AND DATE_PART('year',  fecha_creacion) = 2026
+          AND DATE_PART('month', fecha_creacion) = 4
+        ORDER BY 1, 2
+        LIMIT 60
+    """)
+    log.info("MELGAR Apr-2026 tipo_interaccion × origen × has_user: %s", cur.fetchall())
+
+    # 3. Sample of leads where nombres_usuario IS NULL across all interactions
+    cur.execute("""
+        SELECT i.cliente_id, i.tipo_interaccion, i.origen, i.nombres_usuario, i.fecha_creacion
+        FROM tuna.interacciones i
+        WHERE i.codigo_proyecto = 'MELGAR'
+          AND DATE_PART('year',  i.fecha_creacion) = 2026
+          AND DATE_PART('month', i.fecha_creacion) = 4
+          AND i.tipo_interaccion NOT IN ('facebook','creacion de evento')
+        ORDER BY i.cliente_id, i.fecha_creacion
+        LIMIT 80
+    """)
+    log.info("MELGAR Apr-2026 non-fb interactions sample: %s", cur.fetchall())
+    log.info("=== DIAGNOSTIC END ===")
+    # ──────────────────────────────────────────────────────────────────────────
+
     all_leads_rows  = []
     all_kpis_rows   = []
 
