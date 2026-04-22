@@ -361,16 +361,18 @@ def extract_lead_details(
         GROUP BY i.cliente_id
     ),
 
-    -- 5. Contact data (phone, email, ultimo_vendedor) from tuna.clientes.
-    --    ultimo_vendedor is the asesor Sperant shows on the client card — used as
-    --    fallback when no interaction-derived asesor is found (e.g. fresh Meta leads
-    --    whose 'creación de cliente' row has nombres_usuario = NULL).
+    -- 5. Contact data (phone, email, asesor fallbacks) from tuna.clientes.
+    --    For fresh Meta leads the 'creación de cliente' interaction has
+    --    nombres_usuario = NULL, so primer_asesor returns NULL.
+    --    Fallback chain: ultimo_vendedor → usuario_creador (both from tuna.clientes).
+    --    ultimo_vendedor = last asesor to interact; usuario_creador = who registered the lead.
     datos_cliente AS (
         SELECT
             c.id              AS cliente_id,
             COALESCE(NULLIF(TRIM(c.celulares), ''), NULLIF(TRIM(c.telefono), '')) AS celular,
             NULLIF(TRIM(c.email), '')                                              AS email,
-            NULLIF(TRIM(c.ultimo_vendedor), '')                                   AS ultimo_vendedor
+            NULLIF(TRIM(c.ultimo_vendedor), '')                                   AS ultimo_vendedor,
+            NULLIF(TRIM(c.usuario_creador), '')                                   AS usuario_creador
         FROM tuna.clientes c
         INNER JOIN cosecha_periodo cp ON cp.cliente_id = c.id
     ),
@@ -542,9 +544,10 @@ def extract_lead_details(
         COALESCE(cp.utm_medium,   pmg.utm_medium)               AS utm_medium,
         COALESCE(cp.utm_term,     pmg.utm_term)                 AS utm_term,
 
-        -- Asesor: prefer interaction-derived name; fall back to tuna.clientes.ultimo_vendedor
-        -- (covers fresh Meta leads where 'creación de cliente' has nombres_usuario = NULL)
-        COALESCE(pa.asesor_nombre, dc.ultimo_vendedor) AS asesor_nombre,
+        -- Asesor: interaction-derived → ultimo_vendedor → usuario_creador
+        -- Fresh Meta leads have nombres_usuario=NULL on creación de cliente,
+        -- so we fall back to the tuna.clientes fields Sperant uses.
+        COALESCE(pa.asesor_nombre, dc.ultimo_vendedor, dc.usuario_creador) AS asesor_nombre,
 
         pf.fecha_proforma,
         sp.fecha_separacion,
@@ -832,32 +835,6 @@ def run_etl():
     conn = redshift_connect()
     cur = conn.cursor()
     log.info("Connected.")
-
-    # ── DIAGNOSTIC 2: check tuna.clientes + interactions for the 11 missing-asesor leads ──
-    TARGET_EMAILS = [
-        'hmijail.sv@gmail.com', 'luisafernandabustosmedina@gmail.com',
-        'sayurikimurasol77@gmail.com', 'angns.00@gmail.com',
-        'E.huayane12@gmail.com', 'Alvaroduclos15@gmail.com',
-        'schelsyangie@gmail.com', 'marielvia01@gmail.com',
-        'Acmariapaz399@gmail.com', 'david_jandro_9@hotmail.com',
-        'mfalburqueque@gmail.com',
-    ]
-    email_list = ", ".join(f"'{e.lower()}'" for e in TARGET_EMAILS)
-    cur.execute(f"""
-        SELECT c.id, c.nombres, c.apellidos, c.email,
-               c.ultimo_vendedor, c.usuario_creador, c.username
-        FROM tuna.clientes c
-        WHERE LOWER(TRIM(c.email)) IN ({email_list})
-    """)
-    log.info("=== DIAG2 tuna.clientes for 11 leads: %s ===", cur.fetchall())
-
-    # Also check all tuna schema tables
-    cur.execute("""
-        SELECT DISTINCT table_name FROM information_schema.tables
-        WHERE table_schema = 'tuna' ORDER BY 1
-    """)
-    log.info("=== DIAG2 tuna tables: %s ===", [r[0] for r in cur.fetchall()])
-    # ─────────────────────────────────────────────────────────────────────────
 
     all_leads_rows  = []
     all_kpis_rows   = []
