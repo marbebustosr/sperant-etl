@@ -468,16 +468,21 @@ def extract_lead_details(
     ),
 
     -- 11. First asesor after Meta arrival (falls back to first human in project if no Meta).
-    --     Exclude the sperant_chat 'creación de cliente' row: that event is created
-    --     automatically by the chat widget and stores the agent's login username
-    --     (e.g. 'eflores') instead of their display name.  Subsequent human
-    --     interactions (calls, WhatsApp, etc.) correctly populate nombres_usuario
-    --     with the full name, so we skip to those.
+    --     For sperant_chat leads, the auto-generated 'creación de cliente' event stores
+    --     the agent's system login (e.g. 'eflores') in nombres_usuario instead of their
+    --     full display name.  We deprioritise that row so any subsequent human interaction
+    --     (call, WhatsApp, visit) — which carries the full name — wins.  If no human
+    --     follow-up exists yet the chat-creation row is used as a fallback.
     primer_asesor AS (
         SELECT
             i.cliente_id,
             FIRST_VALUE(i.nombres_usuario)
-                OVER (PARTITION BY i.cliente_id ORDER BY i.fecha_creacion ASC
+                OVER (PARTITION BY i.cliente_id
+                      ORDER BY
+                        CASE WHEN i.origen = 'sperant_chat'
+                              AND i.tipo_interaccion = 'creación de cliente'
+                             THEN 1 ELSE 0 END ASC,
+                        i.fecha_creacion ASC
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
                 ) AS asesor_nombre
         FROM tuna.interacciones i
@@ -486,7 +491,6 @@ def extract_lead_details(
           AND i.nombres_usuario IS NOT NULL
           AND i.nombres_usuario != ''
           AND i.tipo_interaccion NOT IN ('facebook', 'creacion de evento')
-          AND NOT (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
     ),
     primer_asesor_dedup AS (
         SELECT DISTINCT cliente_id, asesor_nombre FROM primer_asesor
