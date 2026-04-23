@@ -1,0 +1,179 @@
+name: Diagnose Redshift — Palacios leads
+
+on:
+  workflow_dispatch:
+    inputs:
+      sperant_code:
+        description: "Sperant project code"
+        required: false
+        default: "PALACIOS"
+      year:
+        description: "Year to diagnose"
+        required: false
+        default: "2025"
+      month:
+        description: "Month to diagnose"
+        required: false
+        default: "5"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Run diagnostic
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          SPERANT_CODE: ${{ github.event.inputs.sperant_code }}
+          YEAR:  ${{ github.event.inputs.year }}
+          MONTH: ${{ github.event.inputs.month }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+          code  = os.environ["SPERANT_CODE"]
+          year  = int(os.environ["YEAR"])
+          month = int(os.environ["MONTH"])
+
+          print(f"\n=== DIAGNÓSTICO {code} {year}-{month:02d} ===\n")
+
+          # 1. Total interacciones en el periodo
+          cur.execute(f"""
+            SELECT COUNT(*) as total
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+          """)
+          print(f"1) Total interacciones en el mes: {cur.fetchone()[0]}")
+
+          # 2. Desglose por origen
+          cur.execute(f"""
+            SELECT origen, COUNT(*) as cnt
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+            GROUP BY origen
+            ORDER BY cnt DESC
+          """)
+          print("\n2) Por origen:")
+          for row in cur.fetchall(): print(f"   {row[0]}: {row[1]}")
+
+          # 3. Desglose por tipo_interaccion
+          cur.execute(f"""
+            SELECT tipo_interaccion, COUNT(*) as cnt
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+            GROUP BY tipo_interaccion
+            ORDER BY cnt DESC
+          """)
+          print("\n3) Por tipo_interaccion:")
+          for row in cur.fetchall(): print(f"   {row[0]}: {row[1]}")
+
+          # 4. Clientes únicos en el periodo (todos los tipos)
+          cur.execute(f"""
+            SELECT COUNT(DISTINCT cliente_id) as clientes_unicos
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+          """)
+          print(f"\n4) Clientes únicos (todos los tipos): {cur.fetchone()[0]}")
+
+          # 5. Clientes cuya PRIMERA interacción en el proyecto fue en este mes
+          cur.execute(f"""
+            WITH primera AS (
+              SELECT cliente_id, MIN(fecha_creacion) AS primera_fecha
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{code}'
+              GROUP BY cliente_id
+            )
+            SELECT COUNT(*) as nuevos
+            FROM primera
+            WHERE DATE_PART('year',  primera_fecha) = {year}
+              AND DATE_PART('month', primera_fecha) = {month}
+          """)
+          print(f"\n5) Clientes con PRIMERA interacción en el mes (cosecha amplia): {cur.fetchone()[0]}")
+
+          # 6. Cosecha ETL actual (seed restringido)
+          cur.execute(f"""
+            WITH cosecha_ranked AS (
+              SELECT cliente_id,
+                ROW_NUMBER() OVER (PARTITION BY cliente_id ORDER BY fecha_creacion ASC) AS rn
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{code}'
+                AND (
+                  (origen = 'fblead_ads' AND tipo_interaccion IN ('facebook','creación de cliente'))
+                  OR (origen = 'manual' AND tipo_interaccion = 'creación de cliente')
+                  OR (origen = 'sperant_chat' AND tipo_interaccion = 'creación de cliente')
+                  OR tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
+                )
+            )
+            SELECT COUNT(*) FROM cosecha_ranked
+            WHERE rn = 1
+              AND (SELECT DATE_PART('year',  fecha_creacion) FROM tuna.interacciones i2
+                   WHERE i2.cliente_id = cosecha_ranked.cliente_id
+                     AND i2.codigo_proyecto = '{code}'
+                   ORDER BY fecha_creacion ASC LIMIT 1) = {year}
+          """)
+
+          # Simpler version
+          cur.execute(f"""
+            WITH cosecha_ranked AS (
+              SELECT cliente_id, fecha_creacion,
+                ROW_NUMBER() OVER (PARTITION BY cliente_id ORDER BY fecha_creacion ASC) AS rn
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{code}'
+                AND (
+                  (origen = 'fblead_ads' AND tipo_interaccion IN ('facebook','creación de cliente'))
+                  OR (origen = 'manual' AND tipo_interaccion = 'creación de cliente')
+                  OR (origen = 'sperant_chat' AND tipo_interaccion = 'creación de cliente')
+                  OR tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
+                )
+            )
+            SELECT COUNT(*) FROM cosecha_ranked
+            WHERE rn = 1
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+          """)
+          print(f"\n6) Cosecha ETL (seed restringido): {cur.fetchone()[0]}")
+
+          # 7. fblead_ads leads en el periodo
+          cur.execute(f"""
+            SELECT COUNT(DISTINCT cliente_id)
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND origen = 'fblead_ads'
+              AND tipo_interaccion IN ('facebook', 'creación de cliente')
+              AND DATE_PART('year',  fecha_creacion) = {year}
+              AND DATE_PART('month', fecha_creacion) = {month}
+          """)
+          print(f"\n7) Clientes únicos fblead_ads en el mes: {cur.fetchone()[0]}")
+
+          cur.close()
+          conn.close()
+          print("\n=== FIN ===")
+          EOF
