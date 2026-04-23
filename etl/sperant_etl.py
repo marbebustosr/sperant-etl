@@ -274,19 +274,22 @@ def extract_lead_details(
     # attributed to the sub-campaign, so we exclude them.
     if utm_filter:
         seed_where = f"""
-              i.origen = 'fblead_ads'
+              i.origen IN ('fblead_ads', 'fblead')
           AND i.tipo_interaccion IN ('facebook','creación de cliente')
           {utm_clause.replace('utm_campaign', 'i.utm_campaign')}
         """
     else:
         seed_where = """
               (
-                 (i.origen = 'fblead_ads' AND i.tipo_interaccion IN ('facebook','creación de cliente'))
+                 (i.origen IN ('fblead_ads', 'fblead') AND i.tipo_interaccion IN ('facebook','creación de cliente'))
               OR (i.origen = 'manual'     AND i.tipo_interaccion = 'creación de cliente')
               OR (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
               OR i.tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
               )
         """
+        # NOTE: 'fblead' is the legacy origin name used by Sperant before ~Aug 2025.
+        # After that date it became 'fblead_ads'. Both must be included to capture
+        # Meta leads from earlier months.
 
     query = f"""
     WITH
