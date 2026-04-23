@@ -798,6 +798,119 @@ def compute_kpis(
 
 
 
+# ---------------------------------------------------------------------------
+# Unit demand extraction
+# ---------------------------------------------------------------------------
+
+def extract_unit_demand(cur, sperant_code: str, year: int, month: int) -> list[dict]:
+    """
+    Count proformas, separaciones and ventas per unit for a given project × month.
+    Joins tuna.interacciones with tuna.unidades for metadata (area, price, type).
+    Returns rows sorted by proformas DESC.
+    """
+    cur.execute(f"""
+        WITH proformas AS (
+            SELECT
+                i.codigo_unidad,
+                i.nombre_unidad,
+                COUNT(DISTINCT i.cliente_id) AS proformas
+            FROM tuna.interacciones i
+            WHERE i.codigo_proyecto = '{sperant_code}'
+              AND i.tipo_interaccion = 'creación de proforma'
+              AND DATE_PART('year',  i.fecha_creacion) = {year}
+              AND DATE_PART('month', i.fecha_creacion) = {month}
+              AND i.codigo_unidad IS NOT NULL
+              AND i.codigo_unidad <> ''
+            GROUP BY i.codigo_unidad, i.nombre_unidad
+        ),
+        separaciones AS (
+            SELECT
+                i.codigo_unidad,
+                COUNT(DISTINCT i.cliente_id) AS separaciones
+            FROM tuna.interacciones i
+            WHERE i.codigo_proyecto = '{sperant_code}'
+              AND i.nivel_interes = 'separación'
+              AND DATE_PART('year',  i.fecha_creacion) = {year}
+              AND DATE_PART('month', i.fecha_creacion) = {month}
+              AND i.codigo_unidad IS NOT NULL
+              AND i.codigo_unidad <> ''
+            GROUP BY i.codigo_unidad
+        ),
+        ventas AS (
+            SELECT
+                i.codigo_unidad,
+                COUNT(DISTINCT i.cliente_id) AS ventas
+            FROM tuna.interacciones i
+            WHERE i.codigo_proyecto = '{sperant_code}'
+              AND i.nivel_interes = 'venta'
+              AND DATE_PART('year',  i.fecha_creacion) = {year}
+              AND DATE_PART('month', i.fecha_creacion) = {month}
+              AND i.codigo_unidad IS NOT NULL
+              AND i.codigo_unidad <> ''
+            GROUP BY i.codigo_unidad
+        )
+        SELECT
+            p.codigo_unidad,
+            p.nombre_unidad,
+            u.tipo_unidad,
+            u.piso,
+            u.total_habitaciones,
+            u.total_banos,
+            u.area_techada,
+            u.area_total,
+            u.precio_lista,
+            u.precio_m2,
+            u.moneda_precio_lista,
+            u.estado_comercial,
+            p.proformas,
+            COALESCE(s.separaciones, 0) AS separaciones,
+            COALESCE(v.ventas, 0)       AS ventas
+        FROM proformas p
+        LEFT JOIN tuna.unidades     u ON u.codigo       = p.codigo_unidad
+        LEFT JOIN separaciones      s ON s.codigo_unidad = p.codigo_unidad
+        LEFT JOIN ventas            v ON v.codigo_unidad = p.codigo_unidad
+        ORDER BY p.proformas DESC
+    """)
+    rows = cur.fetchall()
+    results = []
+    for r in rows:
+        results.append({
+            "codigo_unidad":       r[0],
+            "nombre_unidad":       r[1],
+            "tipo_unidad":         r[2],
+            "piso":                str(r[3]) if r[3] is not None else None,
+            "total_habitaciones":  float(r[4]) if r[4] is not None else None,
+            "total_banos":         int(r[5]) if r[5] is not None else None,
+            "area_techada":        float(r[6]) if r[6] is not None else None,
+            "area_total":          float(r[7]) if r[7] is not None else None,
+            "precio_lista":        float(r[8]) if r[8] is not None else None,
+            "precio_m2":           float(r[9]) if r[9] is not None else None,
+            "moneda_precio_lista": r[10],
+            "estado_comercial":    r[11],
+            "proformas":           int(r[12]),
+            "separaciones":        int(r[13]),
+            "ventas":              int(r[14]),
+        })
+    return results
+
+
+def supabase_rpc_upsert_unit_demand(records: list[dict]) -> None:
+    """Upsert sperant_unidades_demanda via SECURITY DEFINER RPC."""
+    if not records:
+        return
+    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_unidades_demanda"
+    headers = _supabase_headers()
+    batch_size = 200
+    for i in range(0, len(records), batch_size):
+        batch = records[i: i + batch_size]
+        resp = requests.post(url, headers=headers, data=json.dumps({"rows": batch}), timeout=120)
+        if resp.status_code not in (200, 201, 204):
+            log.error("RPC unit_demand upsert error %s: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+        log.info("  ✓ RPC unit_demand: batch %d-%d", i, i + len(batch))
+    log.info("  ✓ Upserted %d unit demand rows via RPC", len(records))
+
+
 def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
     """
     Upsert sperant_kpis via the upsert_sperant_kpis(JSONB) SECURITY DEFINER function.
@@ -839,8 +952,9 @@ def run_etl():
     cur = conn.cursor()
     log.info("Connected.")
 
-    all_leads_rows  = []
-    all_kpis_rows   = []
+    all_leads_rows        = []
+    all_kpis_rows         = []
+    all_unit_demand_rows  = []
 
     for project in PROJECTS:
         code         = project["sperant_code"]
@@ -887,6 +1001,15 @@ def run_etl():
                     kpi["total_ventas"],
                 )
 
+                # Unit demand (proformas × unidad × mes)
+                unit_rows = extract_unit_demand(cur, code, year, month)
+                for ur in unit_rows:
+                    ur["project_id"]   = supabase_id
+                    ur["periodo_anio"] = year
+                    ur["periodo_mes"]  = month
+                all_unit_demand_rows.extend(unit_rows)
+                log.info("    %d unit demand rows", len(unit_rows))
+
             except Exception as e:
                 log.error("    ERROR processing %s %s: %s", code, period_label, e)
                 # Reconnect on transaction abort
@@ -910,6 +1033,11 @@ def run_etl():
     if all_kpis_rows:
         log.info("Upserting %d KPI rows via RPC...", len(all_kpis_rows))
         supabase_rpc_upsert_kpis(all_kpis_rows)
+
+    # Upsert unit demand
+    if all_unit_demand_rows:
+        log.info("Upserting %d unit demand rows via RPC...", len(all_unit_demand_rows))
+        supabase_rpc_upsert_unit_demand(all_unit_demand_rows)
 
     log.info("=== ETL complete ===")
 
