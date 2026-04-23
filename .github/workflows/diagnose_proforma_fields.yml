@@ -1,0 +1,156 @@
+name: Diagnose Redshift — Proforma & unit fields
+
+on:
+  workflow_dispatch:
+    inputs:
+      sperant_code:
+        description: "Sperant project code"
+        required: false
+        default: "PALACIOS"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Run diagnostic
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          SPERANT_CODE: ${{ github.event.inputs.sperant_code }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+          code = os.environ["SPERANT_CODE"]
+
+          print(f"\n=== DIAGNÓSTICO CAMPOS PROFORMA/UNIDAD — {code} ===\n")
+
+          # 1. Todas las columnas de tuna.interacciones
+          cur.execute("""
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'tuna' AND table_name = 'interacciones'
+            ORDER BY ordinal_position
+          """)
+          cols = cur.fetchall()
+          print("1) Columnas de tuna.interacciones:")
+          for col in cols:
+              print(f"   {col[0]:35s} {col[1]}")
+
+          # 2. Muestra de 3 filas de 'creación de proforma' con TODAS las columnas
+          col_names = [c[0] for c in cols]
+          cur.execute(f"""
+            SELECT *
+            FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND tipo_interaccion = 'creación de proforma'
+            LIMIT 3
+          """)
+          rows = cur.fetchall()
+          print(f"\n2) Muestra de filas tipo 'creación de proforma' ({len(rows)} filas):")
+          for row in rows:
+              print("   ---")
+              for name, val in zip(col_names, row):
+                  if val is not None and str(val).strip() not in ('', 'None'):
+                      print(f"   {name:35s} = {val}")
+
+          # 3. ¿Hay tablas de proformas, cotizaciones o inmuebles en tuna?
+          cur.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'tuna'
+            ORDER BY table_name
+          """)
+          tables = cur.fetchall()
+          print("\n3) Tablas disponibles en schema 'tuna':")
+          for t in tables:
+              print(f"   {t[0]}")
+
+          # 4. Si existe tuna.proformas, mostrar sus columnas
+          tuna_tables = [t[0] for t in tables]
+          for tbl in ['proformas', 'cotizaciones', 'inmuebles', 'unidades', 'separaciones']:
+              if tbl in tuna_tables:
+                  cur.execute(f"""
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'tuna' AND table_name = '{tbl}'
+                    ORDER BY ordinal_position
+                  """)
+                  print(f"\n4) Columnas de tuna.{tbl}:")
+                  for col in cur.fetchall():
+                      print(f"   {col[0]:35s} {col[1]}")
+
+                  # Muestra de 2 filas del proyecto
+                  try:
+                      cur.execute(f"""
+                        SELECT * FROM tuna.{tbl}
+                        WHERE codigo_proyecto = '{code}'
+                        LIMIT 2
+                      """)
+                  except Exception:
+                      try:
+                          cur.execute(f"SELECT * FROM tuna.{tbl} LIMIT 2")
+                      except Exception as e:
+                          print(f"   (no se pudo leer: {e})")
+                          conn.rollback()
+                          continue
+                  rows2 = cur.fetchall()
+                  cur2_desc = [d[0] for d in cur.description]
+                  print(f"   Muestra ({len(rows2)} filas):")
+                  for row in rows2:
+                      print("   ---")
+                      for name, val in zip(cur2_desc, row):
+                          if val is not None and str(val).strip() not in ('', 'None'):
+                              print(f"   {name:35s} = {val}")
+
+          # 5. Campos no-nulos en eventos 'creación de proforma' — cuántos tienen valor
+          print(f"\n5) Cobertura de campos en 'creación de proforma' para {code}:")
+          cur.execute(f"""
+            SELECT COUNT(*) FROM tuna.interacciones
+            WHERE codigo_proyecto = '{code}'
+              AND tipo_interaccion = 'creación de proforma'
+          """)
+          total_pf = cur.fetchone()[0]
+          print(f"   Total eventos proforma: {total_pf}")
+
+          for col in col_names:
+              if col in ('codigo_proyecto', 'tipo_interaccion', 'cliente_id', 'fecha_creacion'):
+                  continue
+              try:
+                  cur.execute(f"""
+                    SELECT COUNT(*) FROM tuna.interacciones
+                    WHERE codigo_proyecto = '{code}'
+                      AND tipo_interaccion = 'creación de proforma'
+                      AND {col} IS NOT NULL
+                      AND CAST({col} AS VARCHAR) <> ''
+                  """)
+                  cnt = cur.fetchone()[0]
+                  if cnt > 0:
+                      print(f"   {col:35s} tiene valor en {cnt}/{total_pf} filas")
+              except Exception:
+                  conn.rollback()
+
+          cur.close()
+          conn.close()
+          print("\n=== FIN ===")
+          EOF
