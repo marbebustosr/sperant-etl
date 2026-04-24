@@ -121,7 +121,10 @@ PROJECTS = [
         "utm_filter":    None,
     },
     {
-        "sperant_code":  "R125",
+        # Romana está mapeado como HENKO en Sperant/Redshift. Con el código
+        # anterior "R125" el ETL no encontraba actividad (kpis en cero,
+        # sperant_unidades_demanda vacío). Verificado 2026-04-24.
+        "sperant_code":  "HENKO",
         "supabase_id":   "bfd04ac2-9070-37b1-f4b1-5fba42b0b05f",
         "nombre":        "13 Romana",
         "utm_filter":    None,
