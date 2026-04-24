@@ -233,6 +233,44 @@ def supabase_rpc_upsert_leads(records: list[dict]) -> None:
     log.info("  ✓ Upserted %d lead rows via RPC", total_processed)
 
 
+def supabase_rpc_sync_leads_period(
+    project_id: str, year: int, month: int, cliente_ids: list[int]
+) -> int:
+    """
+    Delete ghost rows in sperant_leads for (project, year, month) whose
+    sperant_cliente_id is NOT in the passed list. Call AFTER the upsert for
+    that period. Prevents ghost rows when the cosecha universe shifts (e.g.
+    seed definition changes, or a lead gets re-bucketed into a different
+    month). See migration 20260424170000 for rationale.
+
+    Returns number of rows deleted.
+    """
+    if not cliente_ids:
+        # Function short-circuits on empty array, but save the round-trip.
+        return 0
+
+    url = f"{SUPABASE_URL}/rest/v1/rpc/sync_sperant_leads_period"
+    headers = _supabase_headers()
+    payload = json.dumps({
+        "p_project_id":  project_id,
+        "p_year":        year,
+        "p_month":       month,
+        "p_cliente_ids": cliente_ids,
+    })
+    resp = requests.post(url, headers=headers, data=payload, timeout=60)
+    if resp.status_code not in (200, 201, 204):
+        log.error("RPC sync_leads_period error %s: %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+    try:
+        n_deleted = int(resp.json()) if resp.text else 0
+    except (ValueError, json.JSONDecodeError):
+        n_deleted = 0
+    if n_deleted > 0:
+        log.info("  ✓ Synced %s %d-%02d: deleted %d ghost rows",
+                 project_id, year, month, n_deleted)
+    return n_deleted
+
+
 # ---------------------------------------------------------------------------
 # Core ETL queries
 # ---------------------------------------------------------------------------
@@ -476,6 +514,21 @@ def extract_lead_details(
         GROUP BY i.cliente_id
     ),
 
+    -- 10b. Last HUMAN interaction per cliente in this project (for pipeline
+    --      freshness / "días sin contacto"). Excludes facebook form-fills,
+    --      calendar events, and API pings — same exclusion list the Actividades
+    --      tab uses so both surfaces agree.
+    ultima_interaccion AS (
+        SELECT
+            i.cliente_id,
+            MAX(i.fecha_creacion) AS last_interaction_at
+        FROM tuna.interacciones i
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND i.tipo_interaccion NOT IN ('facebook','creacion de evento','api')
+        GROUP BY i.cliente_id
+    ),
+
     -- 11. First asesor after Meta arrival (falls back to first human in project if no Meta).
     --     For sperant_chat leads, the auto-generated 'creación de cliente' event stores
     --     the agent's system login (e.g. 'eflores') in nombres_usuario instead of their
@@ -600,7 +653,9 @@ def extract_lead_details(
             WHEN pcg.fecha_primera_creacion_global IS NULL
             THEN 'RECAP_SILENT'
             ELSE 'RECAP_CROSS'
-        END                                                                     AS subclasificacion
+        END                                                                     AS subclasificacion,
+
+        ui.last_interaction_at
 
     FROM cosecha_periodo cp
     LEFT JOIN datos_cliente              dc  ON dc.cliente_id  = cp.cliente_id
@@ -617,6 +672,7 @@ def extract_lead_details(
     LEFT JOIN primer_asesor_dedup        pa  ON pa.cliente_id  = cp.cliente_id
     LEFT JOIN citas_agendadas            ca  ON ca.cliente_id  = cp.cliente_id
     LEFT JOIN citas_completadas          cc  ON cc.cliente_id  = cp.cliente_id
+    LEFT JOIN ultima_interaccion         ui  ON ui.cliente_id  = cp.cliente_id
     ORDER BY cp.fecha_creacion
     """
 
@@ -624,7 +680,7 @@ def extract_lead_details(
     rows = cur.fetchall()
 
     results = []
-    # Column order from SELECT (28 cols):
+    # Column order from SELECT:
     #  0 sperant_cliente_id  1 dni                 2 nombre_completo
     #  3 celular             4 email
     #  5 fecha_llegada_meta  6 fecha_cosecha       7 fecha_creacion_sperant
@@ -637,6 +693,7 @@ def extract_lead_details(
     # 24 fecha_proforma 25 fecha_separacion 26 fecha_venta
     # 27 fecha_cita_agendada 28 fecha_cita_completada
     # 29 canal_origen 30 tipo_novedad 31 subclasificacion
+    # 32 last_interaction_at
     for r in rows:
         horas = float(r[8]) if r[8] is not None else None
         if horas is not None and horas < 0:
@@ -675,6 +732,7 @@ def extract_lead_details(
             "canal_origen":           r[29],
             "tipo_novedad":           r[30],
             "subclasificacion":       r[31],
+            "last_interaction_at":    r[32].isoformat() if r[32] else None,
         })
 
     return results
@@ -1052,6 +1110,9 @@ def run_etl():
     all_kpis_rows          = []
     all_unit_demand_rows   = []
     all_interacciones_rows = []
+    # (project_id, year, month) -> list of sperant_cliente_id emitted.
+    # Used after the bulk upsert to prune ghost rows via sync_sperant_leads_period.
+    period_cliente_ids: dict[tuple[str, int, int], list[int]] = {}
 
     for project in PROJECTS:
         code         = project["sperant_code"]
@@ -1073,6 +1134,7 @@ def run_etl():
                     continue
 
                 # Build lead rows for Supabase
+                cliente_ids_this_period: list[int] = []
                 for lead in leads:
                     row = {
                         "project_id":    supabase_id,
@@ -1083,6 +1145,9 @@ def run_etl():
                     }
                     row.update(lead)
                     all_leads_rows.append(row)
+                    if lead.get("sperant_cliente_id"):
+                        cliente_ids_this_period.append(int(lead["sperant_cliente_id"]))
+                period_cliente_ids[(supabase_id, year, month)] = cliente_ids_this_period
 
                 # Compute KPIs
                 kpi = compute_kpis(leads, code, year, month, cur, utm_filter)
@@ -1134,6 +1199,18 @@ def run_etl():
     if all_leads_rows:
         log.info("Upserting %d lead rows via RPC...", len(all_leads_rows))
         supabase_rpc_upsert_leads(all_leads_rows)
+
+        # Prune ghost rows: any row in the periods we just touched whose
+        # cliente_id wasn't in our emit list is stale (cosecha universe shifted,
+        # ETL no longer produces it, but ON CONFLICT left it behind).
+        log.info("Pruning ghost rows for %d (project, period) pairs...",
+                 len(period_cliente_ids))
+        total_pruned = 0
+        for (project_id, year, month), cliente_ids in period_cliente_ids.items():
+            total_pruned += supabase_rpc_sync_leads_period(
+                project_id, year, month, cliente_ids
+            )
+        log.info("  ✓ Pruned %d total ghost rows across all periods", total_pruned)
 
     # Upsert KPIs via SECURITY DEFINER RPC (bypasses RLS without service_role)
     if all_kpis_rows:
