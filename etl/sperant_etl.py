@@ -48,7 +48,7 @@ REDSHIFT_DB       = os.environ.get("REDSHIFT_DB",       "q7m2x9htp4wd")
 REDSHIFT_USER     = os.environ.get("REDSHIFT_USER",     "xpbc16x4oaq9")
 REDSHIFT_PASSWORD = os.environ.get("REDSHIFT_PASSWORD", "")  # REQUIRED — set as secret
 
-SUPABASE_URL      = os.environ.get("SUPABASE_URL",      "https://yvdwgxbkuhifxgwinafs.supabase.co")
+SUPABASE_URL      = os.environ.get("SUPABASE_URL",      "https://aayywnivwqpmoflanxkk.supabase.co")
 SUPABASE_KEY      = os.environ.get("SUPABASE_KEY",      "")  # anon key — set as GitHub secret
 
 # How many months back to process (default: current + 2 months back for safety)
