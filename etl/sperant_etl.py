@@ -865,15 +865,31 @@ def compute_kpis(
 
 def extract_unit_demand(cur, sperant_code: str, year: int, month: int) -> list[dict]:
     """
-    Count proformas, separaciones and ventas per unit for a given project × month.
-    Joins tuna.interacciones with tuna.unidades for metadata (area, price, type).
-    Returns rows sorted by proformas DESC.
+    Return one row per unit in the project, with monthly proforma/separación/venta
+    counts LEFT-JOINed in.
+
+    Driver: `tuna.unidades` filtered by code prefix (`codigo LIKE 'SPERANT_CODE-%'`).
+    Unit codes in Sperant follow the convention `{PROJECT_CODE}-{...}` (verified
+    2026-04-24 for Paraíso: STRN-301, STRN-DE-101, STRN-PH-802, etc.). Using
+    `tuna.unidades` as the driver means we get every unit in the project —
+    including those without any proforma in the lookback window — so the
+    dashboard's Total/Disponibles/Vendidas stock counts are accurate.
+
+    Previous version drove from the `proformas` CTE, which meant units with
+    zero proformas in the processed month never got inserted into
+    `sperant_unidades_demanda`. That understated inventory for slow-moving
+    projects (Romana: 0 proformas → 0 rows; Paraíso: 5 units missing).
+    Changed 2026-04-24.
+
+    Also includes any unit referenced in interacciones for this project (even
+    if its codigo doesn't match the prefix) via UNION — defensive for legacy
+    units with non-conforming codes.
     """
     cur.execute(f"""
         WITH proformas AS (
             SELECT
                 i.codigo_unidad,
-                i.nombre_unidad,
+                MAX(i.nombre_unidad) AS nombre_unidad,
                 COUNT(DISTINCT i.cliente_id) AS proformas
             FROM tuna.interacciones i
             WHERE i.codigo_proyecto = '{sperant_code}'
@@ -882,7 +898,7 @@ def extract_unit_demand(cur, sperant_code: str, year: int, month: int) -> list[d
               AND DATE_PART('month', i.fecha_creacion) = {month}
               AND i.codigo_unidad IS NOT NULL
               AND i.codigo_unidad <> ''
-            GROUP BY i.codigo_unidad, i.nombre_unidad
+            GROUP BY i.codigo_unidad
         ),
         separaciones AS (
             SELECT
@@ -909,10 +925,23 @@ def extract_unit_demand(cur, sperant_code: str, year: int, month: int) -> list[d
               AND i.codigo_unidad IS NOT NULL
               AND i.codigo_unidad <> ''
             GROUP BY i.codigo_unidad
+        ),
+        -- Universe of unit codes for this project: all units in tuna.unidades
+        -- matching the prefix, plus any extra codes referenced via interacciones
+        -- this month (covers legacy codes that don't follow the prefix convention).
+        unit_codes AS (
+            SELECT codigo FROM tuna.unidades
+             WHERE codigo LIKE '{sperant_code}-%'
+            UNION
+            SELECT codigo_unidad AS codigo FROM proformas
+            UNION
+            SELECT codigo_unidad AS codigo FROM separaciones
+            UNION
+            SELECT codigo_unidad AS codigo FROM ventas
         )
         SELECT
-            p.codigo_unidad,
-            p.nombre_unidad,
+            c.codigo                          AS codigo_unidad,
+            COALESCE(p.nombre_unidad, u.codigo) AS nombre_unidad,
             u.tipo_unidad,
             u.piso,
             u.total_habitaciones,
@@ -923,14 +952,15 @@ def extract_unit_demand(cur, sperant_code: str, year: int, month: int) -> list[d
             u.precio_m2,
             u.moneda_precio_lista,
             u.estado_comercial,
-            p.proformas,
+            COALESCE(p.proformas,    0) AS proformas,
             COALESCE(s.separaciones, 0) AS separaciones,
-            COALESCE(v.ventas, 0)       AS ventas
-        FROM proformas p
-        LEFT JOIN tuna.unidades     u ON u.codigo       = p.codigo_unidad
-        LEFT JOIN separaciones      s ON s.codigo_unidad = p.codigo_unidad
-        LEFT JOIN ventas            v ON v.codigo_unidad = p.codigo_unidad
-        ORDER BY p.proformas DESC
+            COALESCE(v.ventas,       0) AS ventas
+        FROM unit_codes c
+        LEFT JOIN tuna.unidades u ON u.codigo        = c.codigo
+        LEFT JOIN proformas     p ON p.codigo_unidad = c.codigo
+        LEFT JOIN separaciones  s ON s.codigo_unidad = c.codigo
+        LEFT JOIN ventas        v ON v.codigo_unidad = c.codigo
+        ORDER BY COALESCE(p.proformas, 0) DESC, c.codigo
     """)
     rows = cur.fetchall()
     results = []
