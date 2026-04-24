@@ -122,4 +122,51 @@ CREATE INDEX IF NOT EXISTS idx_sperant_leads_nivel_interes
 CREATE INDEX IF NOT EXISTS idx_sperant_leads_es_desestimado
   ON sperant_leads (es_desestimado);
 
+-- ---------------------------------------------------------------------------
+-- sperant_interacciones: row-per-touchpoint log
+--
+-- One row per activity (call, WhatsApp, form fill, proforma, visit, state
+-- change) synced from Sperant's `tuna.interacciones`. Enables the Actividades
+-- tab's daily supervision, per-asesor productivity rankings, and follow-up
+-- alerts — queries that pre-aggregated `sperant_leads` cannot support
+-- because it only stores MIN(fecha) per milestone per lead.
+--
+-- Canonical migration lives in the frontend repo:
+--   tunopal/supabase/migrations/20260424000000_sperant_interacciones.sql
+-- Mirrored here so the ETL repo is self-documenting.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.sperant_interacciones (
+  id                  UUID         DEFAULT gen_random_uuid() PRIMARY KEY,
+  sperant_cliente_id  BIGINT       NOT NULL,
+  project_id          UUID         REFERENCES public.projects(id),
+  sperant_codigo      TEXT,
+  fecha               TIMESTAMPTZ  NOT NULL,
+  asesor_nombre       TEXT,
+  origen              TEXT         NOT NULL DEFAULT '',
+  tipo_interaccion    TEXT         NOT NULL DEFAULT '',
+  nivel_interes       TEXT,
+  razon_desistimiento TEXT,
+  codigo_unidad       TEXT,
+  nombre_unidad       TEXT,
+  utm_source          TEXT,
+  utm_campaign        TEXT,
+  utm_content         TEXT,
+  utm_medium          TEXT,
+  utm_term            TEXT,
+  created_at          TIMESTAMPTZ  DEFAULT now(),
+  updated_at          TIMESTAMPTZ  DEFAULT now(),
+  CONSTRAINT sperant_interacciones_unique
+    UNIQUE (sperant_cliente_id, fecha, tipo_interaccion, origen)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sperant_interacciones_project_fecha
+  ON public.sperant_interacciones (project_id, fecha DESC);
+CREATE INDEX IF NOT EXISTS idx_sperant_interacciones_asesor_fecha
+  ON public.sperant_interacciones (asesor_nombre, fecha DESC);
+CREATE INDEX IF NOT EXISTS idx_sperant_interacciones_cliente
+  ON public.sperant_interacciones (sperant_cliente_id);
+CREATE INDEX IF NOT EXISTS idx_sperant_interacciones_tipo
+  ON public.sperant_interacciones (tipo_interaccion);
+
 -- Done!

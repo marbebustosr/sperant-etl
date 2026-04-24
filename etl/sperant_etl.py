@@ -911,6 +911,102 @@ def supabase_rpc_upsert_unit_demand(records: list[dict]) -> None:
     log.info("  ✓ Upserted %d unit demand rows via RPC", len(records))
 
 
+def extract_interacciones(
+    cur, sperant_code: str, year: int, month: int, utm_filter: Optional[str],
+) -> list[dict]:
+    """
+    Extract every individual interaction for a project × month from tuna.interacciones.
+
+    Unlike extract_lead_details (which produces MIN(fecha) per milestone per lead),
+    this returns one row per touchpoint — enabling the Actividades tab to show
+    accurate daily advisor activity, timelines, and follow-up alerts.
+
+    utm_filter: if set (e.g. "paraiso" for STRN's Paraíso sub-campaign), restricts
+    rows to those whose `utm_campaign` matches the filter OR whose cliente_id has
+    at least one Meta touch matching the filter. This keeps non-Meta interactions
+    (calls, WhatsApp) for Paraíso leads while excluding generic STRN leads.
+    """
+    if utm_filter:
+        where_utm = f"""
+          AND (
+               i.utm_campaign ILIKE '%{utm_filter}%'
+            OR i.cliente_id IN (
+                 SELECT DISTINCT j.cliente_id
+                 FROM tuna.interacciones j
+                 WHERE j.codigo_proyecto = '{sperant_code}'
+                   AND j.origen = 'fblead_ads'
+                   AND j.utm_campaign ILIKE '%{utm_filter}%'
+               )
+          )
+        """
+    else:
+        where_utm = ""
+
+    cur.execute(f"""
+        SELECT
+            i.cliente_id,
+            i.fecha_creacion,
+            i.nombres_usuario                           AS asesor_nombre,
+            COALESCE(i.origen, '')                      AS origen,
+            COALESCE(i.tipo_interaccion, '')            AS tipo_interaccion,
+            i.nivel_interes,
+            i.razon_desistimiento,
+            NULLIF(TRIM(i.codigo_unidad), '')           AS codigo_unidad,
+            NULLIF(TRIM(i.nombre_unidad), '')           AS nombre_unidad,
+            i.utm_source, i.utm_campaign, i.utm_content, i.utm_medium, i.utm_term
+        FROM tuna.interacciones i
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND DATE_PART('year',  i.fecha_creacion) = {year}
+          AND DATE_PART('month', i.fecha_creacion) = {month}
+          {where_utm}
+    """)
+    rows = cur.fetchall()
+    results = []
+    for r in rows:
+        results.append({
+            "sperant_cliente_id":  int(r[0]) if r[0] is not None else None,
+            "fecha":               r[1].isoformat() if r[1] else None,
+            "asesor_nombre":       r[2],
+            "origen":              r[3] or "",
+            "tipo_interaccion":    r[4] or "",
+            "nivel_interes":       r[5],
+            "razon_desistimiento": r[6],
+            "codigo_unidad":       r[7],
+            "nombre_unidad":       r[8],
+            "utm_source":          r[9],
+            "utm_campaign":        r[10],
+            "utm_content":         r[11],
+            "utm_medium":          r[12],
+            "utm_term":            r[13],
+        })
+    # Filter out rows with missing required fields (cliente_id, fecha) —
+    # the Supabase table has them as NOT NULL.
+    return [r for r in results if r["sperant_cliente_id"] is not None and r["fecha"]]
+
+
+def supabase_rpc_upsert_interacciones(records: list[dict]) -> None:
+    """
+    Upsert sperant_interacciones via the upsert_sperant_interacciones(JSONB)
+    SECURITY DEFINER function. Bypasses RLS — mirrors the other RPC helpers.
+    Unique key is (sperant_cliente_id, fecha, tipo_interaccion, origen).
+    """
+    if not records:
+        return
+    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_interacciones"
+    headers = _supabase_headers()
+    batch_size = 500  # lighter rows than sperant_leads
+    total_processed = 0
+    for i in range(0, len(records), batch_size):
+        batch = records[i: i + batch_size]
+        resp = requests.post(url, headers=headers, data=json.dumps({"rows": batch}), timeout=180)
+        if resp.status_code not in (200, 201, 204):
+            log.error("RPC interacciones upsert error %s: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+        total_processed += len(batch)
+        log.info("  ✓ RPC interacciones: batch %d-%d", i, i + len(batch))
+    log.info("  ✓ Upserted %d interaction rows via RPC", total_processed)
+
+
 def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
     """
     Upsert sperant_kpis via the upsert_sperant_kpis(JSONB) SECURITY DEFINER function.
@@ -952,9 +1048,10 @@ def run_etl():
     cur = conn.cursor()
     log.info("Connected.")
 
-    all_leads_rows        = []
-    all_kpis_rows         = []
-    all_unit_demand_rows  = []
+    all_leads_rows         = []
+    all_kpis_rows          = []
+    all_unit_demand_rows   = []
+    all_interacciones_rows = []
 
     for project in PROJECTS:
         code         = project["sperant_code"]
@@ -1010,6 +1107,15 @@ def run_etl():
                 all_unit_demand_rows.extend(unit_rows)
                 log.info("    %d unit demand rows", len(unit_rows))
 
+                # Individual interactions (row-per-touchpoint) for the
+                # Actividades tab. Stamped with project_id + sperant_codigo.
+                int_rows = extract_interacciones(cur, code, year, month, utm_filter)
+                for ir in int_rows:
+                    ir["project_id"]     = supabase_id
+                    ir["sperant_codigo"] = code
+                all_interacciones_rows.extend(int_rows)
+                log.info("    %d interacciones", len(int_rows))
+
             except Exception as e:
                 log.error("    ERROR processing %s %s: %s", code, period_label, e)
                 # Reconnect on transaction abort
@@ -1038,6 +1144,11 @@ def run_etl():
     if all_unit_demand_rows:
         log.info("Upserting %d unit demand rows via RPC...", len(all_unit_demand_rows))
         supabase_rpc_upsert_unit_demand(all_unit_demand_rows)
+
+    # Upsert individual interactions (row-per-touchpoint)
+    if all_interacciones_rows:
+        log.info("Upserting %d interaction rows via RPC...", len(all_interacciones_rows))
+        supabase_rpc_upsert_interacciones(all_interacciones_rows)
 
     log.info("=== ETL complete ===")
 
