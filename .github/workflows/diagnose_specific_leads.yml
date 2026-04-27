@@ -87,7 +87,9 @@ jobs:
               ix = cur.fetchall()
               print(f"\n[2] tuna.interacciones ({len(ix)} rows):")
               for r in ix:
-                  print(f"    {r[2]} · {r[1]} · origen={r[3]:12s} · tipo={r[4]:30s} · nivel={r[5]} · utm={r[6]} · asesor={r[7]}")
+                  origen = (r[3] or '?')[:12].ljust(12)
+                  tipo   = (r[4] or '?')[:30].ljust(30)
+                  print(f"    {r[2]} · {r[1]} · origen={origen} · tipo={tipo} · nivel={r[5]} · utm={r[6]} · asesor={r[7]}")
 
               # 3) Check if any interaction in MELGAR April 2026
               cur.execute(f"""
