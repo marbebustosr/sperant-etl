@@ -1,0 +1,103 @@
+name: Diagnose Redshift — specific leads
+
+# Ad-hoc workflow para investigar leads específicos que aparecen en
+# Meta Ads / planillas operativas pero no en sperant_leads. Busca por
+# nombre, teléfono, email y DNI en tuna.interacciones y tuna.clientes.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Run diagnostic
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          # 3 missing leads from Melgar abril 2026 reconciliation
+          targets = [
+              ("Carlos Augusto Roque Silva", "carlosroque.9308@gmail.com", None,        "949508121"),
+              ("Elizabeth Miranda Leon",     "emiranda@vlv.pe",            "46049019",  "956705032"),
+              ("Kosto Escobar",              None,                         "74233796",  "956290961"),
+          ]
+
+          for nombre, email, dni, tel in targets:
+              print(f"\n{'='*70}\n{nombre}\n  email={email} dni={dni} tel={tel}\n{'='*70}")
+
+              # 1) tuna.clientes — does the cliente exist at all?
+              clauses = []
+              if email: clauses.append(f"LOWER(email) = LOWER('{email}')")
+              if dni:   clauses.append(f"documento = '{dni}'")
+              if tel:
+                  clauses.append(f"REPLACE(REPLACE(celulares, '51', ''), ' ', '') LIKE '%{tel}%'")
+                  clauses.append(f"REPLACE(REPLACE(telefono, '51', ''), ' ', '')  LIKE '%{tel}%'")
+              where = " OR ".join(clauses)
+              cur.execute(f"""
+                  SELECT id, nombres, apellidos, documento, email, celulares, telefono
+                    FROM tuna.clientes
+                   WHERE {where}
+                   LIMIT 10
+              """)
+              clientes = cur.fetchall()
+              print(f"\n[1] tuna.clientes ({len(clientes)} match):")
+              for c in clientes:
+                  print(f"    cliente_id={c[0]} {c[1]} {c[2]} · DNI={c[3]} · {c[4]} · cel={c[5]} tel={c[6]}")
+
+              if not clientes:
+                  print("    → NO existe en tuna.clientes. Lead no llegó a Sperant.")
+                  continue
+
+              # 2) tuna.interacciones por cliente_id
+              cliente_ids = [str(c[0]) for c in clientes]
+              cids = ",".join(cliente_ids)
+              cur.execute(f"""
+                  SELECT cliente_id, codigo_proyecto, fecha_creacion, origen, tipo_interaccion,
+                         nivel_interes, utm_campaign, nombres_usuario
+                    FROM tuna.interacciones
+                   WHERE cliente_id IN ({cids})
+                   ORDER BY fecha_creacion ASC
+                   LIMIT 30
+              """)
+              ix = cur.fetchall()
+              print(f"\n[2] tuna.interacciones ({len(ix)} rows):")
+              for r in ix:
+                  print(f"    {r[2]} · {r[1]} · origen={r[3]:12s} · tipo={r[4]:30s} · nivel={r[5]} · utm={r[6]} · asesor={r[7]}")
+
+              # 3) Check if any interaction in MELGAR April 2026
+              cur.execute(f"""
+                  SELECT COUNT(*)
+                    FROM tuna.interacciones
+                   WHERE cliente_id IN ({cids})
+                     AND codigo_proyecto = 'MELGAR'
+                     AND DATE_PART('year',  fecha_creacion) = 2026
+                     AND DATE_PART('month', fecha_creacion) = 4
+              """)
+              n = cur.fetchone()[0]
+              print(f"\n[3] Interacciones en MELGAR abril 2026: {n}")
+          EOF
