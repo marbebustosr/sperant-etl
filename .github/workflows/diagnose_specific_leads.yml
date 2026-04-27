@@ -40,11 +40,14 @@ jobs:
           )
           cur = conn.cursor()
 
-          # 3 missing leads from Melgar abril 2026 reconciliation
+          # 6 missing leads from full month Melgar 2026-04 reconciliation
           targets = [
-              ("Carlos Augusto Roque Silva", "carlosroque.9308@gmail.com", None,        "949508121"),
-              ("Elizabeth Miranda Leon",     "emiranda@vlv.pe",            "46049019",  "956705032"),
-              ("Kosto Escobar",              None,                         "74233796",  "956290961"),
+              ("Gloria Ocampo",              "gloria_ebel@hotmail.com",     "9622059",   "957291909"),
+              ("Lili Trevino",               "japazacom@hotmail.com",       "29410250",  "933526496"),
+              ("Marialejandra Calero",       "marialejandracalero@gmail.com","74291376", "970958773"),
+              ("Edgardo Ortega Carbajal",    "edgardortegac@gmail.com",     "30414113",  "958318320"),
+              ("Gloria Maldonado Zamudio",   "gloriachimoy@hotmail.com",    "10555507",  "950173498"),
+              ("Ladyy Bolimbo",              "ladyanchivilca@gmail.com",    "71395530",  "930179918"),
           ]
 
           for nombre, email, dni, tel in targets:
