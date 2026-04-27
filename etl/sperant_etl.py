@@ -771,6 +771,8 @@ def compute_kpis(
             "distribucion_desistimiento":  None,
             "distribucion_canal_origen":   None,
             "distribucion_subclasificacion": None,
+            "meta_touchpoints_mes":        0,
+            "meta_recap_historico":        0,
             "updated_at":                  datetime.now(timezone.utc).isoformat(),
         }
 
@@ -831,6 +833,33 @@ def compute_kpis(
     total_separaciones = sum(1 for l in leads if l["tiene_separacion"])
     total_ventas       = sum(1 for l in leads if l["tiene_venta"])
 
+    # ── Métrica adicional sin filtro cosecha ─────────────────────────────
+    # `meta_touchpoints_mes` cuenta clientes únicos con un touchpoint Meta
+    # (fblead_ads + facebook|creación de cliente) en el período, IGNORANDO
+    # la regla cosecha (rn=1). Refleja exactamente lo que reporta Meta Ads
+    # Manager — incluye clientes que ya estaban en CRM de meses anteriores
+    # y que volvieron a llenar el form este mes.
+    #
+    # `meta_recap_historico` = touchpoints − leads cosecha META_ADS del mes.
+    # Es el subconjunto que ya estaba cosechado en otro período (gap operativo
+    # entre dashboard y reporte Meta).
+    utm_clause_q = get_utm_clause(utm_filter).replace('utm_campaign', 'i.utm_campaign')
+    cur.execute(f"""
+        SELECT COUNT(DISTINCT i.cliente_id)
+          FROM tuna.interacciones i
+         WHERE i.codigo_proyecto = '{sperant_code}'
+           AND i.origen IN ('fblead_ads', 'fblead')
+           AND i.tipo_interaccion IN ('facebook', 'creación de cliente')
+           AND DATE_PART('year',  i.fecha_creacion) = {year}
+           AND DATE_PART('month', i.fecha_creacion) = {month}
+           {utm_clause_q}
+    """)
+    meta_touchpoints_mes = int(cur.fetchone()[0] or 0)
+    n_meta_cosecha = canal_dist.get("META_ADS", 0)
+    # Si por alguna razón touchpoints < cosecha (e.g. lookback excluye datos),
+    # forzar a 0 para no mostrar negativos en el dashboard.
+    meta_recap_historico = max(0, meta_touchpoints_mes - n_meta_cosecha)
+
     return {
         "sperant_codigo":              sperant_code,
         "periodo_anio":                year,
@@ -842,6 +871,8 @@ def compute_kpis(
         "total_proformas":             total_proformas,
         "total_separaciones":          total_separaciones,
         "total_ventas":                total_ventas,
+        "meta_touchpoints_mes":        meta_touchpoints_mes,
+        "meta_recap_historico":        meta_recap_historico,
         "ttl_promedio_horas":          ttl_prom,
         "ttl_pct_menos_1h":            ttl_1h,
         "ttl_pct_menos_4h":            ttl_4h,
