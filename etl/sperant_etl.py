@@ -323,14 +323,18 @@ def extract_lead_details(
         seed_where = """
               (
                  (i.origen IN ('fblead_ads', 'fblead') AND i.tipo_interaccion IN ('facebook','creación de cliente'))
-              OR (i.origen = 'manual'     AND i.tipo_interaccion = 'creación de cliente')
+              OR (i.origen = 'manual'       AND i.tipo_interaccion = 'creación de cliente')
               OR (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
+              OR (i.origen = 'api'          AND i.tipo_interaccion = 'creación de cliente')
               OR i.tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
               )
         """
         # NOTE: 'fblead' is the legacy origin name used by Sperant before ~Aug 2025.
         # After that date it became 'fblead_ads'. Both must be included to capture
         # Meta leads from earlier months.
+        # NOTE: 'api' added 2026-04-28 — Sperant integraciones nuevas (WhatsApp
+        # Business API, chatbots, importes) crean clientes con origen='api'.
+        # Sin esto, leads como Brian Taboada (Gemma 2026-04) quedaban fuera de cosecha.
 
     query = f"""
     WITH
@@ -619,6 +623,7 @@ def extract_lead_details(
             WHEN cp.origen = 'fblead_ads'                                       THEN 'META_ADS'
             WHEN cp.origen = 'manual'       AND cp.tipo_interaccion = 'creación de cliente' THEN 'MANUAL'
             WHEN cp.origen = 'sperant_chat' AND cp.tipo_interaccion = 'creación de cliente' THEN 'CHAT'
+            WHEN cp.origen = 'api'          AND cp.tipo_interaccion = 'creación de cliente' THEN 'API'
             WHEN cp.tipo_interaccion IN ('visita al proyecto','visita a oficinas')          THEN 'SALA_VENTAS'
             WHEN cp.tipo_interaccion = 'visita a feria'                          THEN 'FERIA'
             ELSE 'OTRO'
