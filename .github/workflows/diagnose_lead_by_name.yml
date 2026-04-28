@@ -1,0 +1,105 @@
+name: Diagnose Redshift — lead by name
+
+# Búsqueda directa en tuna.clientes + tuna.interacciones por nombre/apellido.
+# Útil cuando el equipo reporta un lead específico que no aparece en sperant_leads.
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Nombre o apellido a buscar (ILIKE %query%)"
+        required: true
+        default: "Cornejo"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Run diagnostic
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          QUERY: ${{ github.event.inputs.query }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+          q = os.environ["QUERY"]
+          like = f"%{q}%"
+
+          print(f"\n=== Búsqueda en tuna.clientes: nombre/apellidos ILIKE '{like}' ===\n")
+          cur.execute("""
+              SELECT id, nombres, apellidos, documento, email, celulares, telefono
+                FROM tuna.clientes
+               WHERE nombres   ILIKE %s
+                  OR apellidos ILIKE %s
+               ORDER BY id DESC
+               LIMIT 30
+          """, (like, like))
+          clientes = cur.fetchall()
+          print(f"Encontrados: {len(clientes)} clientes\n")
+          for c in clientes:
+              cid, nom, ape, doc, em, cel, tel = c
+              print(f"  cliente_id={cid:6d} {(nom or '')[:25]:25s} {(ape or '')[:25]:25s} DNI={doc or '-':20s} email={em or '-':35s} cel={cel or '-'}")
+
+          if not clientes:
+              print("  → Nadie con ese nombre/apellido en tuna.clientes")
+              raise SystemExit(0)
+
+          # Para cada cliente, mostrar interacciones recientes
+          cliente_ids = [str(c[0]) for c in clientes][:10]  # limit deeper queries
+          cids = ",".join(cliente_ids)
+          print(f"\n=== Interacciones de los primeros {len(cliente_ids)} ===\n")
+          cur.execute(f"""
+              SELECT cliente_id, codigo_proyecto, MAX(fecha_creacion) AS ultima,
+                     COUNT(*) AS n_inter,
+                     MAX(nivel_interes) AS ultimo_nivel,
+                     MAX(nombres_usuario) AS asesor
+                FROM tuna.interacciones
+               WHERE cliente_id IN ({cids})
+               GROUP BY cliente_id, codigo_proyecto
+               ORDER BY cliente_id, codigo_proyecto
+          """)
+          rows = cur.fetchall()
+          for r in rows:
+              cid, codp, ult, n, niv, ase = r
+              print(f"  cid={cid:6d} {codp or '-':10s} {ult} · {n:3d} inter · nivel='{niv}' · asesor='{ase}'")
+
+          # Específicamente: ¿alguno está en GEMMA con nivel 'intermedio'?
+          print(f"\n=== Filtro GEMMA + nivel='intermedio' o similares ===\n")
+          cur.execute(f"""
+              SELECT cliente_id, codigo_proyecto, fecha_creacion, nivel_interes,
+                     tipo_interaccion, origen, nombres_usuario
+                FROM tuna.interacciones
+               WHERE cliente_id IN ({cids})
+                 AND codigo_proyecto = 'GEMMA'
+                 AND (LOWER(nivel_interes) LIKE 'inter%' OR LOWER(nivel_interes) = 'alto')
+               ORDER BY cliente_id, fecha_creacion DESC
+          """)
+          interm = cur.fetchall()
+          if not interm:
+              print("  Ninguno marcado intermedio/alto en GEMMA")
+          for r in interm:
+              cid, codp, fc, niv, tipo, orig, ase = r
+              print(f"  cid={cid} · {fc} · nivel={niv} · tipo={tipo} · origen={orig} · asesor={ase}")
+          EOF
