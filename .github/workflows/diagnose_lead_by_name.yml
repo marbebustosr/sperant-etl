@@ -1,15 +1,24 @@
 name: Diagnose Redshift — lead by name
 
-# Búsqueda directa en tuna.clientes + tuna.interacciones por nombre/apellido.
+# Búsqueda directa en tuna.clientes + tuna.interacciones por nombre/apellido,
+# o por cliente_id directamente si se proporciona.
 # Útil cuando el equipo reporta un lead específico que no aparece en sperant_leads.
 
 on:
   workflow_dispatch:
     inputs:
       query:
-        description: "Nombre o apellido a buscar (ILIKE %query%)"
-        required: true
+        description: "Nombre o apellido a buscar (ILIKE %query%) — ignorado si cliente_id se proporciona"
+        required: false
         default: "Cornejo"
+      cliente_id:
+        description: "cliente_id directo — muestra TODAS las interacciones cronológicamente"
+        required: false
+        default: ""
+      proyecto:
+        description: "Filtrar interacciones por proyecto (opcional, ej. GEMMA)"
+        required: false
+        default: ""
 
 jobs:
   diagnose:
@@ -31,6 +40,8 @@ jobs:
           REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
           REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
           QUERY: ${{ github.event.inputs.query }}
+          CID: ${{ github.event.inputs.cliente_id }}
+          PROY: ${{ github.event.inputs.proyecto }}
         run: |
           python - <<'EOF'
           import os, psycopg2
@@ -44,8 +55,37 @@ jobs:
               connect_timeout=30, sslmode="require",
           )
           cur = conn.cursor()
-          q = os.environ["QUERY"]
+          q = os.environ.get("QUERY", "")
+          cid = (os.environ.get("CID") or "").strip()
+          proy = (os.environ.get("PROY") or "").strip()
           like = f"%{q}%"
+
+          # Modo cliente_id directo
+          if cid:
+              cid_int = int(cid)
+              print(f"\n=== Cliente {cid_int} ===\n")
+              cur.execute("SELECT id, nombres, apellidos, documento, email, celulares FROM tuna.clientes WHERE id=%s", (cid_int,))
+              c = cur.fetchone()
+              if not c:
+                  print("  NO existe en tuna.clientes")
+                  raise SystemExit(0)
+              print(f"  {c[1]} {c[2] or ''} · DNI={c[3]} · {c[4]} · cel={c[5]}\n")
+
+              proy_filter = f"AND codigo_proyecto = '{proy}'" if proy else ""
+              print(f"=== Interacciones cronológicas{f' en {proy}' if proy else ''} ===\n")
+              cur.execute(f"""
+                  SELECT fecha_creacion, codigo_proyecto, origen, tipo_interaccion,
+                         nivel_interes, utm_campaign, nombres_usuario
+                    FROM tuna.interacciones
+                   WHERE cliente_id = {cid_int}
+                     {proy_filter}
+                   ORDER BY fecha_creacion ASC
+                   LIMIT 50
+              """)
+              for r in cur.fetchall():
+                  fc, codp, orig, tipo, niv, utm, ase = r
+                  print(f"  {fc} · {codp or '-':10s} · origen={orig or '?':12s} · tipo={(tipo or '?')[:25]:25s} · nivel={niv or '∅':18s} · asesor={ase}")
+              raise SystemExit(0)
 
           print(f"\n=== Búsqueda en tuna.clientes: nombre/apellidos ILIKE '{like}' ===\n")
           cur.execute("""
