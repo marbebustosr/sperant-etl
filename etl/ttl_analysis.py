@@ -71,7 +71,7 @@ SELECT
   COUNT(ttl_horas) AS leads_con_contacto,
   ROUND(100.0 * COUNT(ttl_horas) / COUNT(*), 1) AS pct_contactados,
   ROUND(AVG(CASE WHEN ttl_horas >= 0 THEN ttl_horas END), 2) AS ttl_promedio_horas,
-  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ttl_horas) FILTER (WHERE ttl_horas >= 0), 2) AS ttl_mediana_horas,
+  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CASE WHEN ttl_horas >= 0 THEN ttl_horas END), 2) AS ttl_mediana_horas,
   COUNT(CASE WHEN ttl_horas < 1 THEN 1 END) AS menos_1h,
   COUNT(CASE WHEN ttl_horas >= 1 AND ttl_horas < 4 THEN 1 END) AS entre_1_4h,
   COUNT(CASE WHEN ttl_horas >= 4 AND ttl_horas < 24 THEN 1 END) AS entre_4_24h,
@@ -126,8 +126,8 @@ SELECT
   COUNT(*) AS leads_on_hours,
   ROUND(AVG(CASE WHEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 >= 0
                  THEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 END), 2) AS ttl_prom_horas,
-  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0)
-        FILTER (WHERE DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 >= 0), 2) AS ttl_mediana,
+  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CASE WHEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 >= 0
+        THEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 END), 2) AS ttl_mediana,
   COUNT(CASE WHEN p.fecha_primer_contacto IS NULL THEN 1 END) AS sin_contacto,
   COUNT(CASE WHEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 < 1 THEN 1 END) AS menos_1h,
   COUNT(CASE WHEN DATEDIFF(minute,m.fecha_llegada_meta,p.fecha_primer_contacto)/60.0 BETWEEN 1 AND 4 THEN 1 END) AS en_1_4h
