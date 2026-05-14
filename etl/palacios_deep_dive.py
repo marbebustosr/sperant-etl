@@ -184,33 +184,29 @@ for row in cur.fetchall():
 # ─────────────────────────────────────────────────────────────
 q6 = """
 SELECT
-  asesor_id,
-  asesor_nombre,
+  COALESCE(NULLIF(TRIM(nombres_usuario),''), 'sin_usuario') AS asesor,
   COUNT(DISTINCT cliente_id) AS clientes_atendidos,
-  COUNT(*) AS total_interacciones,
-  ROUND(AVG(CASE WHEN tipo_interaccion NOT IN ('facebook','creacion de evento','api') THEN 1.0 END * 100), 1) AS pct_interacciones_humanas
+  COUNT(*) AS total_interacciones
 FROM tuna.interacciones
 WHERE codigo_proyecto = 'PALACIOS'
   AND fecha_creacion >= DATEADD(month, -3, GETDATE())
-  AND asesor_id IS NOT NULL
-  AND asesor_nombre IS NOT NULL
-GROUP BY 1, 2
+  AND tipo_interaccion NOT IN ('facebook','creacion de evento','api')
+GROUP BY 1
 ORDER BY clientes_atendidos DESC
-LIMIT 8;
+LIMIT 10;
 """
 print(f"\n{SEP}")
-print("6. ASESORES EN PALACIOS — últimos 3 meses")
+print("6. ASESORES EN PALACIOS (por nombres_usuario) — últimos 3 meses")
 print(SEP)
 cur.execute(q6)
 rows = cur.fetchall()
 if rows:
-    cols = [d[0] for d in cur.description]
-    print("  " + "  ".join(f"{c:>22}" for c in cols))
-    print("  " + "-"*100)
+    print(f"  {'Asesor':<30} {'Clientes':>10} {'Interacciones':>14}")
+    print("  " + "-"*56)
     for row in rows:
-        print("  " + "  ".join(f"{str(v):>22}" for v in row))
+        print(f"  {str(row[0]):<30} {row[1]:>10} {row[2]:>14}")
 else:
-    print("  (columnas asesor_id/asesor_nombre no disponibles en este schema)")
+    print("  (sin datos)")
 
 # ─────────────────────────────────────────────────────────────
 # 7. Volumen mensual últimos 6 meses
