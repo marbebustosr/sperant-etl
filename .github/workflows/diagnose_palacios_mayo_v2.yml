@@ -1,0 +1,201 @@
+name: Diagnose v2 — Palacios mayo (46 vs 75)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Deep dive — donde están los ~30 leads que faltan
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          print("=" * 70)
+          print("DIAGNÓSTICO PALACIOS MAYO 2026 v2")
+          print("=" * 70)
+
+          # ────────────────────────────────────────────────────────
+          # HIPÓTESIS A: Clientes en tuna.clientes sin interacciones
+          # ────────────────────────────────────────────────────────
+          print("\n[A] Schema tuna.clientes:")
+          cur.execute("""
+              SELECT column_name FROM information_schema.columns
+              WHERE table_schema='tuna' AND table_name='clientes'
+              ORDER BY ordinal_position
+          """)
+          cli_cols = [r[0] for r in cur.fetchall()]
+          print(f"    Columnas: {cli_cols}")
+
+          # Buscar columnas relacionadas con proyecto/fecha
+          proj_cols = [c for c in cli_cols if 'proyecto' in c.lower() or 'project' in c.lower()]
+          fecha_cols = [c for c in cli_cols if 'fecha' in c.lower() or 'created' in c.lower()]
+          print(f"    Cols proyecto: {proj_cols}")
+          print(f"    Cols fecha:    {fecha_cols}")
+
+          # Si hay codigo_proyecto en clientes, ver cuántos de Palacios mayo
+          if 'codigo_proyecto' in cli_cols and fecha_cols:
+              fcol = 'fecha_creacion' if 'fecha_creacion' in cli_cols else fecha_cols[0]
+              print(f"\n    Clientes creados en {fcol} de mayo 2026 con codigo_proyecto=PALACIOS:")
+              cur.execute(f"""
+                  SELECT COUNT(*)
+                  FROM tuna.clientes
+                  WHERE codigo_proyecto = 'PALACIOS'
+                    AND DATE_PART('year',  {fcol}) = 2026
+                    AND DATE_PART('month', {fcol}) = 5
+              """)
+              print(f"    → {cur.fetchone()[0]} clientes")
+
+              print(f"\n    De esos clientes, ¿cuántos NO tienen interacciones en mayo?")
+              cur.execute(f"""
+                  SELECT COUNT(DISTINCT c.id)
+                  FROM tuna.clientes c
+                  WHERE c.codigo_proyecto = 'PALACIOS'
+                    AND DATE_PART('year',  c.{fcol}) = 2026
+                    AND DATE_PART('month', c.{fcol}) = 5
+                    AND NOT EXISTS (
+                        SELECT 1 FROM tuna.interacciones i
+                        WHERE i.cliente_id = c.id
+                          AND i.codigo_proyecto = 'PALACIOS'
+                          AND DATE_PART('year',  i.fecha_creacion) = 2026
+                          AND DATE_PART('month', i.fecha_creacion) = 5
+                    )
+              """)
+              print(f"    → {cur.fetchone()[0]} clientes en clientes pero NO en interacciones (mayo)")
+
+          # ────────────────────────────────────────────────────────
+          # HIPÓTESIS C: Variantes de codigo_proyecto que matchean palacios
+          # ────────────────────────────────────────────────────────
+          print("\n[C] Variantes de codigo_proyecto que contienen 'palac' (mayo 2026):")
+          cur.execute("""
+              SELECT codigo_proyecto, nombre_proyecto, COUNT(*) AS n,
+                     COUNT(DISTINCT cliente_id) AS clientes
+              FROM tuna.interacciones
+              WHERE (codigo_proyecto ILIKE '%palac%' OR nombre_proyecto ILIKE '%palac%')
+                AND DATE_PART('year',  fecha_creacion) = 2026
+                AND DATE_PART('month', fecha_creacion) = 5
+              GROUP BY codigo_proyecto, nombre_proyecto
+              ORDER BY n DESC
+          """)
+          rows = cur.fetchall()
+          if rows:
+              print(f"    {'CODIGO':<15} {'NOMBRE':<35} {'INTERAC':>8} {'CLIENTES':>10}")
+              for code, nom, n, c in rows:
+                  print(f"    {(code or 'NULL'):<15} {(nom or 'NULL'):<35} {n:>8} {c:>10}")
+          else:
+              print("    (ninguna variante adicional)")
+
+          # ────────────────────────────────────────────────────────
+          # HIPÓTESIS B: Proyección lineal de mayo
+          # ────────────────────────────────────────────────────────
+          print("\n[B] Proyección lineal de mayo 2026 (al día 15 de 31):")
+          cur.execute("""
+              SELECT COUNT(DISTINCT cliente_id)
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = 'PALACIOS'
+                AND DATE_PART('year',  fecha_creacion) = 2026
+                AND DATE_PART('month', fecha_creacion) = 5
+          """)
+          mayo_actual = cur.fetchone()[0]
+          print(f"    Clientes únicos al 15-may:  {mayo_actual}")
+          print(f"    Proyección lineal a fin mes: {round(mayo_actual * 31 / 15)}")
+
+          # Compararación con abril del año pasado y este año
+          cur.execute("""
+              SELECT DATE_PART('year', fecha_creacion)::int AS y,
+                     DATE_PART('month', fecha_creacion)::int AS m,
+                     COUNT(DISTINCT cliente_id) AS clientes
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = 'PALACIOS'
+                AND fecha_creacion >= '2026-01-01'
+              GROUP BY 1, 2
+              ORDER BY 1, 2
+          """)
+          print("\n    Histórico Palacios 2026 (clientes únicos con interacciones):")
+          print(f"    {'YEAR':<6} {'MES':<5} {'CLIENTES':>10}")
+          for y, m, c in cur.fetchall():
+              print(f"    {int(y):<6} {int(m):<5} {c:>10}")
+
+          # ────────────────────────────────────────────────────────
+          # EXTRA: Day-by-day de mayo para ver si hay un dropoff
+          # ────────────────────────────────────────────────────────
+          print("\n[Extra] Clientes únicos por día en mayo (Palacios):")
+          cur.execute("""
+              SELECT DATE_TRUNC('day', fecha_creacion)::date AS dia,
+                     COUNT(DISTINCT cliente_id) AS clientes,
+                     COUNT(*) AS interacciones
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = 'PALACIOS'
+                AND DATE_PART('year',  fecha_creacion) = 2026
+                AND DATE_PART('month', fecha_creacion) = 5
+              GROUP BY 1
+              ORDER BY 1
+          """)
+          print(f"    {'DIA':<12} {'CLIENTES':>10} {'INTERAC':>10}")
+          for d, c, i in cur.fetchall():
+              print(f"    {str(d):<12} {c:>10} {i:>10}")
+
+          # ────────────────────────────────────────────────────────
+          # ¿Cuántos de los 46 clientes mayo son capturados vs recapturados?
+          # ────────────────────────────────────────────────────────
+          print("\n[Split] Capturados vs Recapturados (Palacios mayo):")
+          cur.execute("""
+              WITH primer_palacios AS (
+                  SELECT cliente_id, MIN(fecha_creacion) AS fecha_primera
+                  FROM tuna.interacciones
+                  WHERE codigo_proyecto = 'PALACIOS'
+                  GROUP BY cliente_id
+              ),
+              clientes_mayo AS (
+                  SELECT DISTINCT cliente_id
+                  FROM tuna.interacciones
+                  WHERE codigo_proyecto = 'PALACIOS'
+                    AND DATE_PART('year',  fecha_creacion) = 2026
+                    AND DATE_PART('month', fecha_creacion) = 5
+              )
+              SELECT
+                COUNT(*) FILTER (
+                  WHERE DATE_PART('year',  p.fecha_primera) = 2026
+                    AND DATE_PART('month', p.fecha_primera) = 5
+                ) AS capturados,
+                COUNT(*) FILTER (
+                  WHERE p.fecha_primera < '2026-05-01'
+                ) AS recapturados,
+                COUNT(*) AS total
+              FROM clientes_mayo cm
+              JOIN primer_palacios p ON p.cliente_id = cm.cliente_id
+          """)
+          cap, rec, total = cur.fetchone()
+          print(f"    Capturados:    {cap}")
+          print(f"    Recapturados:  {rec}")
+          print(f"    Total:         {total}")
+
+          conn.close()
+          print("\n" + "=" * 70)
+          print("FIN")
+          print("=" * 70)
+          EOF
