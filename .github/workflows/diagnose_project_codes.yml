@@ -1,0 +1,119 @@
+name: Diagnose — listar codigo_proyecto activos en Sperant
+
+on:
+  workflow_dispatch:
+    inputs:
+      lookback_months:
+        description: "Meses hacia atrás a inspeccionar"
+        required: false
+        default: "3"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: List active codigo_proyecto + diagnose missing ones
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          LOOKBACK: ${{ github.event.inputs.lookback_months }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          from datetime import datetime, timezone
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          n = int(os.environ.get("LOOKBACK", "3"))
+          now = datetime.now(timezone.utc)
+          y, m = now.year, now.month
+          ystart, mstart = y, m
+          for _ in range(n - 1):
+              mstart -= 1
+              if mstart == 0:
+                  mstart = 12
+                  ystart -= 1
+          date_from = f"{ystart}-{mstart:02d}-01"
+          print(f"\n=== Periodo: desde {date_from} hasta hoy ===\n")
+
+          # 1. Lista TODOS los codigo_proyecto con count, ordenado por volumen
+          print(">>> TODOS los codigo_proyecto con actividad en el periodo:")
+          cur.execute(f"""
+              SELECT codigo_proyecto, COUNT(*) AS n_interacciones,
+                     COUNT(DISTINCT cliente_id) AS n_clientes
+              FROM tuna.interacciones
+              WHERE fecha_creacion >= '{date_from}'
+              GROUP BY codigo_proyecto
+              ORDER BY n_interacciones DESC
+          """)
+          rows = cur.fetchall()
+          print(f"{'CODE':<20} {'INTERACCIONES':>15} {'CLIENTES':>12}")
+          print("-" * 50)
+          for code, ni, nc in rows:
+              print(f"{(code or 'NULL'):<20} {ni:>15} {nc:>12}")
+          print(f"\nTotal codigo_proyecto distintos con actividad: {len(rows)}")
+
+          # 2. Para los códigos del ETL: verificar cuántas interacciones tienen
+          etl_codes = ["MELGAR","PALACIOS","MA","STRN","GEMMA","LF","G154","NERVI","M144","PREVERDE","HENKO"]
+          print(f"\n>>> Verificación de códigos configurados en el ETL:")
+          print(f"{'CODE':<15} {'INTERACCIONES':>15} {'STATUS':>10}")
+          print("-" * 45)
+          active_codes = {r[0]: r[1] for r in rows if r[0]}
+          for code in etl_codes:
+              cnt = active_codes.get(code, 0)
+              status = "OK" if cnt > 0 else "VACÍO"
+              print(f"{code:<15} {cnt:>15} {status:>10}")
+
+          # 3. Para los códigos vacíos, buscar candidatos por nombre del proyecto
+          # (en tuna.clientes hay nombre_proyecto / similar?)
+          print(f"\n>>> Códigos posibles para proyectos vacíos:")
+          # Intentamos buscar por nombre en tuna.clientes o algún campo descriptivo
+          # Sperant guarda nombre_proyecto en tuna.interacciones? Verifiquemos schema
+          cur.execute("""
+              SELECT column_name FROM information_schema.columns
+              WHERE table_schema='tuna' AND table_name='interacciones'
+              ORDER BY ordinal_position
+          """)
+          cols = [r[0] for r in cur.fetchall()]
+          print(f"Columnas de tuna.interacciones: {cols}")
+
+          # Si existe nombre_proyecto, buscar por keyword
+          if 'nombre_proyecto' in cols:
+              keywords = ['fresa','nervi','morales','preverde','precursor','romana','henko','143','144']
+              for kw in keywords:
+                  cur.execute(f"""
+                      SELECT codigo_proyecto, nombre_proyecto, COUNT(*) AS n
+                      FROM tuna.interacciones
+                      WHERE fecha_creacion >= '{date_from}'
+                        AND nombre_proyecto ILIKE '%{kw}%'
+                      GROUP BY codigo_proyecto, nombre_proyecto
+                      ORDER BY n DESC LIMIT 5
+                  """)
+                  res = cur.fetchall()
+                  if res:
+                      print(f"\n  Match '{kw}':")
+                      for c, n, cnt in res:
+                          print(f"    code={c!r}, nombre={n!r}, n={cnt}")
+
+          conn.close()
+          print("\n=== Diagnóstico completado ===")
+          EOF
