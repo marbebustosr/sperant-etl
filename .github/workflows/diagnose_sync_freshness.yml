@@ -1,0 +1,87 @@
+name: Diagnose — fecha del último dato por proyecto
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Confirmar Sperant→Redshift parado para todos los proyectos
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          # 1. Fecha del último dato por proyecto en tuna.interacciones
+          print(">>> Último dato por codigo_proyecto en tuna.interacciones:")
+          cur.execute("""
+              SELECT codigo_proyecto,
+                     MAX(fecha_creacion) AS ultimo,
+                     COUNT(*) FILTER (WHERE fecha_creacion >= CURRENT_DATE - INTERVAL '14 days') AS n_ult14d_unused
+              FROM tuna.interacciones
+              GROUP BY codigo_proyecto
+              ORDER BY ultimo DESC
+          """)
+          # Redshift no soporta FILTER, hago workaround
+          conn.rollback()
+          cur.execute("""
+              SELECT codigo_proyecto, MAX(fecha_creacion) AS ultimo, COUNT(*) AS total
+              FROM tuna.interacciones
+              GROUP BY codigo_proyecto
+              ORDER BY ultimo DESC
+          """)
+          rows = cur.fetchall()
+          print(f"{'CODIGO':<15} {'ULTIMA FECHA':<25} {'TOTAL HIST':>12}")
+          print("-" * 55)
+          for code, ult, n in rows:
+              print(f"{(code or 'NULL'):<15} {str(ult):<25} {n:>12,}")
+
+          # 2. Última fecha global del CRM
+          print("\n>>> Última fecha en tuna.interacciones (global, sin filtro de proyecto):")
+          cur.execute("SELECT MAX(fecha_creacion), MAX(fecha_actualizacion) FROM tuna.interacciones")
+          fc, fa = cur.fetchone()
+          print(f"   fecha_creacion MAX:      {fc}")
+          print(f"   fecha_actualizacion MAX: {fa}")
+
+          # 3. Última fecha en tuna.clientes
+          print("\n>>> Última fecha en tuna.clientes:")
+          cur.execute("SELECT MAX(fecha_creacion), MAX(fecha_actualizacion) FROM tuna.clientes")
+          fc, fa = cur.fetchone()
+          print(f"   fecha_creacion MAX:      {fc}")
+          print(f"   fecha_actualizacion MAX: {fa}")
+
+          # 4. Conteo de interacciones por día en últimos 20 días (todos los proyectos)
+          print("\n>>> Volumen diario global (últimos 20 días):")
+          cur.execute("""
+              SELECT DATE_TRUNC('day', fecha_creacion)::date AS dia, COUNT(*) AS n
+              FROM tuna.interacciones
+              WHERE fecha_creacion >= CURRENT_DATE - 20
+              GROUP BY 1
+              ORDER BY 1
+          """)
+          print(f"{'DIA':<14} {'INTERACCIONES':>15}")
+          for d, n in cur.fetchall():
+              print(f"{str(d):<14} {n:>15}")
+
+          conn.close()
+          EOF
