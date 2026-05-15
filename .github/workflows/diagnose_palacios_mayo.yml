@@ -1,0 +1,175 @@
+name: Diagnose — Palacios mayo 2026 (15 vs 75 leads)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Deep dive on PALACIOS may 2026
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+          CODE = "PALACIOS"
+          YEAR, MONTH = 2026, 5
+
+          print(f"\n=== Diagnóstico Palacios mayo 2026 ===\n")
+
+          # 1) Cuenta total de interacciones en mayo
+          cur.execute(f"""
+              SELECT COUNT(*), COUNT(DISTINCT cliente_id)
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{CODE}'
+                AND DATE_PART('year', fecha_creacion) = {YEAR}
+                AND DATE_PART('month', fecha_creacion) = {MONTH}
+          """)
+          ni, nc = cur.fetchone()
+          print(f"Total interacciones en mayo (cualquier origen/tipo): {ni}")
+          print(f"Clientes distintos con interacción en mayo: {nc}")
+
+          # 2) Breakdown por origen × tipo_interaccion
+          print(f"\n>>> Breakdown origen × tipo_interaccion (interacciones de mayo):")
+          cur.execute(f"""
+              SELECT origen, tipo_interaccion, COUNT(*) AS n,
+                     COUNT(DISTINCT cliente_id) AS clientes
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{CODE}'
+                AND DATE_PART('year', fecha_creacion) = {YEAR}
+                AND DATE_PART('month', fecha_creacion) = {MONTH}
+              GROUP BY origen, tipo_interaccion
+              ORDER BY n DESC
+          """)
+          print(f"{'ORIGEN':<20} {'TIPO_INTERACCION':<35} {'N':>8} {'CLIENTES':>10}")
+          print("-" * 75)
+          for o, t, n, c in cur.fetchall():
+              print(f"{(o or 'NULL'):<20} {(t or 'NULL'):<35} {n:>8} {c:>10}")
+
+          # 3) Clientes cuyo PRIMER touchpoint (en cualquier proyecto, cualquier origen)
+          #    está en mayo Y su primer touchpoint en PALACIOS está en mayo
+          print(f"\n>>> Clientes NUEVOS en mayo (primer touchpoint global EN mayo + en PALACIOS):")
+          cur.execute(f"""
+              WITH primer_global AS (
+                  SELECT cliente_id, MIN(fecha_creacion) AS fecha_primer
+                  FROM tuna.interacciones
+                  GROUP BY cliente_id
+              ),
+              primer_en_palacios AS (
+                  SELECT cliente_id, MIN(fecha_creacion) AS fecha_primer_palacios
+                  FROM tuna.interacciones
+                  WHERE codigo_proyecto = '{CODE}'
+                  GROUP BY cliente_id
+              )
+              SELECT COUNT(DISTINCT pg.cliente_id)
+              FROM primer_global pg
+              INNER JOIN primer_en_palacios pp ON pp.cliente_id = pg.cliente_id
+              WHERE DATE_PART('year',  pg.fecha_primer) = {YEAR}
+                AND DATE_PART('month', pg.fecha_primer) = {MONTH}
+          """)
+          print(f"  → {cur.fetchone()[0]}")
+
+          # 4) Clientes cuyo primer touchpoint EN PALACIOS está en mayo
+          #    (independientemente de si llegaron antes a otro proyecto = recapturados)
+          print(f"\n>>> Clientes con primer touchpoint EN PALACIOS en mayo (nuevos + recap):")
+          cur.execute(f"""
+              WITH primer_en_palacios AS (
+                  SELECT cliente_id, MIN(fecha_creacion) AS fecha_primer
+                  FROM tuna.interacciones
+                  WHERE codigo_proyecto = '{CODE}'
+                  GROUP BY cliente_id
+              )
+              SELECT COUNT(*) FROM primer_en_palacios
+              WHERE DATE_PART('year',  fecha_primer) = {YEAR}
+                AND DATE_PART('month', fecha_primer) = {MONTH}
+          """)
+          print(f"  → {cur.fetchone()[0]}")
+
+          # 5) Re-correr la seed del ETL exactamente como hace cosecha_periodo
+          print(f"\n>>> Cosecha ETL (replica exacta de cosecha_periodo de Palacios mayo):")
+          cur.execute(f"""
+              WITH cosecha_ranked AS (
+                  SELECT i.cliente_id, i.fecha_creacion, i.origen, i.tipo_interaccion,
+                         ROW_NUMBER() OVER (PARTITION BY i.cliente_id ORDER BY i.fecha_creacion ASC) AS rn
+                  FROM tuna.interacciones i
+                  WHERE i.codigo_proyecto = '{CODE}'
+                    AND (
+                          (i.origen IN ('fblead_ads', 'fblead') AND i.tipo_interaccion IN ('facebook','creación de cliente'))
+                       OR (i.origen = 'manual'       AND i.tipo_interaccion = 'creación de cliente')
+                       OR (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
+                       OR (i.origen = 'api'          AND i.tipo_interaccion = 'creación de cliente')
+                       OR i.tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
+                    )
+              )
+              SELECT COUNT(*) FROM cosecha_ranked
+              WHERE rn = 1
+                AND DATE_PART('year',  fecha_creacion) = {YEAR}
+                AND DATE_PART('month', fecha_creacion) = {MONTH}
+          """)
+          print(f"  → {cur.fetchone()[0]}")
+
+          # 6) Origenes que NO están en el seed pero existen
+          print(f"\n>>> Interacciones de mayo con origen/tipo NO incluidos en el seed:")
+          cur.execute(f"""
+              SELECT origen, tipo_interaccion, COUNT(*) AS n, COUNT(DISTINCT cliente_id) AS c
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{CODE}'
+                AND DATE_PART('year',  fecha_creacion) = {YEAR}
+                AND DATE_PART('month', fecha_creacion) = {MONTH}
+                AND NOT (
+                      (origen IN ('fblead_ads', 'fblead') AND tipo_interaccion IN ('facebook','creación de cliente'))
+                   OR (origen = 'manual'       AND tipo_interaccion = 'creación de cliente')
+                   OR (origen = 'sperant_chat' AND tipo_interaccion = 'creación de cliente')
+                   OR (origen = 'api'          AND tipo_interaccion = 'creación de cliente')
+                   OR tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
+                )
+              GROUP BY origen, tipo_interaccion
+              ORDER BY n DESC
+          """)
+          excl = cur.fetchall()
+          if excl:
+              print(f"{'ORIGEN':<20} {'TIPO_INTERACCION':<35} {'N':>8} {'CLIENTES':>10}")
+              print("-" * 75)
+              for o, t, n, c in excl:
+                  print(f"{(o or 'NULL'):<20} {(t or 'NULL'):<35} {n:>8} {c:>10}")
+          else:
+              print("  (ninguno)")
+
+          # 7) Clientes con fblead_ads en mayo pero SIN aparecer en cosecha de mayo
+          print(f"\n>>> Clientes con form-fill Meta en mayo:")
+          cur.execute(f"""
+              SELECT COUNT(DISTINCT cliente_id)
+              FROM tuna.interacciones
+              WHERE codigo_proyecto = '{CODE}'
+                AND origen IN ('fblead_ads', 'fblead')
+                AND DATE_PART('year', fecha_creacion) = {YEAR}
+                AND DATE_PART('month', fecha_creacion) = {MONTH}
+          """)
+          print(f"  → {cur.fetchone()[0]} (cualquier tipo_interaccion bajo fblead_ads en mayo)")
+
+          conn.close()
+          print(f"\n=== Fin diagnóstico ===")
+          EOF
