@@ -59,6 +59,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Asegurar que el label exista (idempotente)
+          gh label create audit-leads --color C0392B \
+            --description "Auditoría leads Meta vs Sperant" 2>/dev/null || true
+
           TODAY=$(date -u +%Y-%m-%d)
           TITLE="🔴 Auditoría leads — faltantes detectados ($TODAY)"
           BODY_FILE=/tmp/issue_body.md
