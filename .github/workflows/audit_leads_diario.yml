@@ -122,6 +122,7 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           subject: ${{ steps.mail.outputs.subject }}
           to: marbe@tuna.pe
+          cc: alonso@tuna.pe,javier@tuna.pe
           from: Auditoría Leads TUNA <marbe@tuna.pe>
           body: file:///tmp/mail_body.txt
 
