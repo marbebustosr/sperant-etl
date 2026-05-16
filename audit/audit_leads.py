@@ -40,9 +40,8 @@ from openpyxl import load_workbook
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-SHEET_ID = os.environ.get(
-    "LEADS_SHEET_ID", "151SxHkCYPZFkx7V4nIlv9ZAq5VYcbvlnsp_XrJfLNFE"
-)
+SHEET_ID = os.environ.get("LEADS_SHEET_ID", "").strip() or \
+    "151SxHkCYPZFkx7V4nIlv9ZAq5VYcbvlnsp_XrJfLNFE"
 EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
 
 # Hoja del Sheet → código_proyecto en tuna.interacciones.
@@ -58,8 +57,16 @@ SHEET2CODIGO = {
 SHEETS_INFORMATIVAS = {"vartel", "seres"}  # se reportan pero no se auditan vs Sperant
 
 now = datetime.now(timezone.utc)
-AUDIT_YEAR = int(os.environ.get("AUDIT_YEAR", now.year))
-AUDIT_MONTH = int(os.environ.get("AUDIT_MONTH", now.month))
+
+
+def _env_int(key, default):
+    """os.environ.get pero tolera string vacío (workflow_dispatch sin input)."""
+    v = os.environ.get(key, "")
+    return int(v) if v.strip() else int(default)
+
+
+AUDIT_YEAR = _env_int("AUDIT_YEAR", now.year)
+AUDIT_MONTH = _env_int("AUDIT_MONTH", now.month)
 
 EMAIL_TYPOS = [
     ("gmal.com", "gmail.com"), ("gnail.com", "gmail.com"),
