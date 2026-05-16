@@ -84,8 +84,45 @@ jobs:
             gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label audit-leads
           fi
 
-      - name: Fail job si hubo faltantes (para que GitHub mande email)
+      - name: Preparar asunto y cuerpo del email
+        if: always()
+        id: mail
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          if [ "${{ steps.audit.outputs.exit_code }}" = "2" ]; then
+            echo "subject=🔴 Auditoría leads $TODAY — faltantes / gap operativo" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.audit.outputs.exit_code }}" = "0" ]; then
+            echo "subject=✅ Auditoría leads $TODAY — conciliación OK" >> "$GITHUB_OUTPUT"
+          else
+            echo "subject=⚠️ Auditoría leads $TODAY — el script falló (revisar)" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "Auditoría diaria Leads Sheet (Meta) vs Sperant — $TODAY"
+            echo ""
+            echo "Resumen (las últimas líneas del reporte):"
+            echo "----------------------------------------"
+            tail -n 70 /tmp/audit_output.txt 2>/dev/null || echo "(sin salida — el script no llegó a ejecutar)"
+            echo "----------------------------------------"
+            echo ""
+            echo "Run completo: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > /tmp/mail_body.txt
+
+      - name: Enviar email del resultado (siempre)
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: marbe@tuna.pe
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: ${{ steps.mail.outputs.subject }}
+          to: marbe@tuna.pe
+          from: Auditoría Leads TUNA <marbe@tuna.pe>
+          body: file:///tmp/mail_body.txt
+
+      - name: Fail job si hubo faltantes
         if: steps.audit.outputs.exit_code == '2'
         run: |
-          echo "Faltantes detectados — ver issue audit-leads."
+          echo "Faltantes detectados — ver email + issue audit-leads."
           exit 1
