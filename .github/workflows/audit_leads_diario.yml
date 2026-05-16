@@ -1,0 +1,91 @@
+name: Auditoría diaria — Leads Sheet vs Sperant
+
+on:
+  schedule:
+    - cron: "0 13 * * *" # 8am Lima = 13 UTC (después del ETL de 6am)
+
+  workflow_dispatch:
+    inputs:
+      sheet_id:
+        description: "Google Sheet ID (default: repo variable LEADS_SHEET_ID)"
+        required: false
+        default: ""
+      year:
+        description: "Año a auditar (default: año actual)"
+        required: false
+        default: ""
+      month:
+        description: "Mes a auditar (default: mes actual)"
+        required: false
+        default: ""
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r audit/requirements.txt
+
+      - name: Ejecutar auditoría
+        id: audit
+        continue-on-error: true
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB: ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          LEADS_SHEET_ID: ${{ github.event.inputs.sheet_id != '' && github.event.inputs.sheet_id || vars.LEADS_SHEET_ID }}
+          AUDIT_YEAR: ${{ github.event.inputs.year }}
+          AUDIT_MONTH: ${{ github.event.inputs.month }}
+        run: |
+          set +e
+          python audit/audit_leads.py 2>&1 | tee /tmp/audit_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Crear/actualizar issue si hay faltantes
+        if: steps.audit.outputs.exit_code == '2'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          TITLE="🔴 Auditoría leads — faltantes detectados ($TODAY)"
+          BODY_FILE=/tmp/issue_body.md
+          {
+            echo "Auditoría automática diaria. Hay leads en el Google Sheet de Meta que **no concilian** con Sperant."
+            echo ""
+            echo "Revisar el resumen (columna **Salud**: \`GAP OPERATIVO\` = el equipo no creó los manuales que debía)."
+            echo ""
+            echo '```'
+            tail -n 60 /tmp/audit_output.txt
+            echo '```'
+            echo ""
+            echo "Detalle completo (JSON) en el log del run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "cc @marbebustosr — reenviar a Alonso (alonso@tuna.pe) y Javier (javier@tuna.pe) si el gap persiste."
+          } > "$BODY_FILE"
+
+          # Reusar issue abierto del día si existe; si no, crear nuevo
+          EXISTING=$(gh issue list --label audit-leads --state open --search "$TODAY in:title" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file "$BODY_FILE"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label audit-leads
+          fi
+
+      - name: Fail job si hubo faltantes (para que GitHub mande email)
+        if: steps.audit.outputs.exit_code == '2'
+        run: |
+          echo "Faltantes detectados — ver issue audit-leads."
+          exit 1
