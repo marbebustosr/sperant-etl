@@ -262,6 +262,16 @@ def main():
     """)
     manuales = {r[0]: r[1] for r in cur.fetchall()}
 
+    # Clientes únicos con interacción en el mes por proyecto (universo Sperant)
+    cur.execute(f"""
+        SELECT codigo_proyecto, COUNT(DISTINCT cliente_id)
+        FROM tuna.interacciones
+        WHERE DATE_PART('year', fecha_creacion) = {AUDIT_YEAR}
+          AND DATE_PART('month', fecha_creacion) = {AUDIT_MONTH}
+        GROUP BY codigo_proyecto
+    """)
+    clientes_mes = {r[0]: r[1] for r in cur.fetchall()}
+
     # 3) Clasificar
     def fuzzy_name(name):
         if not name:
@@ -347,7 +357,8 @@ def main():
             if v:
                 print(f"      {k:16s}: {v}")
         resumen.append({"tab": tab, "codigo": codigo, "total": len(leads),
-                         "manuales": man, "salud": salud, **c})
+                         "manuales": man, "salud": salud,
+                         "sperant_mes": clientes_mes.get(codigo, 0), **c})
 
     # Resumen global
     print(f"\n{'='*92}\nRESUMEN GLOBAL\n{'='*92}")
@@ -373,15 +384,86 @@ def main():
             print(f"  · {L['codigo']:9s} {(L.get('name') or '?')[:32]:32s} "
                   f"{L.get('email') or '?':38s} tel={L.get('tel') or '-'}")
 
+    # ── Movimiento vs día anterior (evidencia si Alonso concilia a diario) ──
+    # Snapshot diario versionado en el repo: audit/history/<periodo>/<fecha>.json
+    hist_dir = os.path.join(
+        os.path.dirname(__file__), "history", f"{AUDIT_YEAR}-{AUDIT_MONTH:02d}"
+    )
+    os.makedirs(hist_dir, exist_ok=True)
+    hoy_str = now.strftime("%Y-%m-%d")
+
+    # Snapshot de hoy: por proyecto {sheet, sperant_mes, manuales, faltantes}
+    snap_hoy = {
+        r["codigo"]: {
+            "sheet": r["total"],
+            "sperant_mes": r["sperant_mes"],
+            "manuales": r["manuales"],
+            "faltantes": r["FALTANTE_REAL"],
+        }
+        for r in resumen
+    }
+
+    # Buscar el snapshot anterior más reciente (≠ hoy) del mismo periodo
+    prev = None
+    prev_fecha = None
+    try:
+        files = sorted(
+            f for f in os.listdir(hist_dir)
+            if f.endswith(".json") and f[:-5] < hoy_str
+        )
+        if files:
+            prev_fecha = files[-1][:-5]
+            with open(os.path.join(hist_dir, files[-1])) as fh:
+                prev = json.load(fh)
+    except FileNotFoundError:
+        pass
+
+    print(f"\n{'='*92}")
+    if prev:
+        print(f"MOVIMIENTO vs {prev_fecha} (¿Alonso está conciliando a diario?)")
+        print(f"{'='*92}")
+        print(f"  {'Proyecto':12s}{'ΔSheet':>9s}{'ΔSperant':>10s}"
+              f"{'ΔManual':>9s}{'ΔFaltan':>9s}  Lectura")
+        for r in resumen:
+            cod = r["codigo"]
+            p = prev.get(cod, {})
+            d_sheet = r["total"] - p.get("sheet", r["total"])
+            d_sper = r["sperant_mes"] - p.get("sperant_mes", r["sperant_mes"])
+            d_man = r["manuales"] - p.get("manuales", r["manuales"])
+            d_falt = r["FALTANTE_REAL"] - p.get("faltantes", r["FALTANTE_REAL"])
+            # Lectura: Alonso agregó al Sheet pero el equipo no creó manuales
+            if d_sheet > 0 and d_man == 0 and d_falt >= 0:
+                lectura = "⚠ Sheet creció, 0 manuales"
+            elif d_sheet == 0 and prev:
+                lectura = "Sheet sin cambios"
+            else:
+                lectura = "ok"
+            print(f"  {r['tab']:12s}{d_sheet:>+9d}{d_sper:>+10d}"
+                  f"{d_man:>+9d}{d_falt:>+9d}  {lectura}")
+        print("\n  ΔSheet  = leads que Alonso agregó al Excel desde el snapshot anterior")
+        print("  ΔSperant= clientes nuevos que entraron al CRM (sync auto + manual)")
+        print("  ΔManual = leads que el equipo reconcilió a mano")
+        print("  ΔFaltan = variación de faltantes (sube = peor)")
+    else:
+        print("MOVIMIENTO vs día anterior")
+        print(f"{'='*92}")
+        print("  (primer snapshot del periodo — sin comparación aún. "
+              "Mañana ya habrá deltas.)")
+
     out = {
         "fecha": now.isoformat(),
         "periodo": f"{AUDIT_YEAR}-{AUDIT_MONTH:02d}",
+        "comparado_vs": prev_fecha,
         "resumen": resumen,
         "totales": tot,
         "faltantes": faltantes,
     }
     with open("/tmp/audit_result.json", "w") as f:
         json.dump(out, f, indent=2, ensure_ascii=False, default=str)
+
+    # Guardar snapshot de hoy (lo commitea el workflow)
+    with open(os.path.join(hist_dir, f"{hoy_str}.json"), "w") as f:
+        json.dump(snap_hoy, f, indent=2, ensure_ascii=False)
 
     conn.close()
 

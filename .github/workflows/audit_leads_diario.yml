@@ -21,7 +21,7 @@ on:
 
 permissions:
   issues: write
-  contents: read
+  contents: write
 
 jobs:
   audit:
@@ -54,6 +54,20 @@ jobs:
           python audit/audit_leads.py 2>&1 | tee /tmp/audit_output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
+      - name: Guardar snapshot diario (commit al repo)
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add audit/history/ 2>/dev/null || true
+          if ! git diff --cached --quiet 2>/dev/null; then
+            git commit -m "chore(audit): snapshot diario $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin main || true
+            git push origin HEAD:main || true
+          else
+            echo "Sin cambios en snapshot (ya existe el de hoy)."
+          fi
+
       - name: Crear/actualizar issue si hay faltantes
         if: steps.audit.outputs.exit_code == '2'
         env:
@@ -72,7 +86,7 @@ jobs:
             echo "Revisar el resumen (columna **Salud**: \`GAP OPERATIVO\` = el equipo no creó los manuales que debía)."
             echo ""
             echo '```'
-            tail -n 60 /tmp/audit_output.txt
+            sed -n '/RESUMEN GLOBAL/,$p' /tmp/audit_output.txt
             echo '```'
             echo ""
             echo "Detalle completo (JSON) en el log del run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -105,7 +119,7 @@ jobs:
             echo ""
             echo "Resumen (las últimas líneas del reporte):"
             echo "----------------------------------------"
-            tail -n 70 /tmp/audit_output.txt 2>/dev/null || echo "(sin salida — el script no llegó a ejecutar)"
+            sed -n '/RESUMEN GLOBAL/,$p' /tmp/audit_output.txt 2>/dev/null || echo "(sin salida — el script no llegó a ejecutar)"
             echo "----------------------------------------"
             echo ""
             echo "Run completo: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
