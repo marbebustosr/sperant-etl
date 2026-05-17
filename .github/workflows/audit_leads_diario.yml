@@ -102,28 +102,56 @@ jobs:
             gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label audit-leads
           fi
 
-      - name: Preparar asunto y cuerpo del email
+      - name: Preparar asunto y cuerpo HTML del email
         if: always()
         id: mail
         run: |
           TODAY=$(date -u +%Y-%m-%d)
-          if [ "${{ steps.audit.outputs.exit_code }}" = "2" ]; then
+          EC="${{ steps.audit.outputs.exit_code }}"
+          if [ "$EC" = "2" ]; then
             echo "subject=🔴 Auditoría leads $TODAY — faltantes / gap operativo" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.audit.outputs.exit_code }}" = "0" ]; then
+            COLOR="#C0392B"; ICON="🔴"; ESTADO="Faltantes / gap operativo detectado"
+            INTRO="Hay leads en el Google Sheet de Meta que <b>no concilian</b> con Sperant. Revisa la columna <b>Salud</b>."
+          elif [ "$EC" = "0" ]; then
             echo "subject=✅ Auditoría leads $TODAY — conciliación OK" >> "$GITHUB_OUTPUT"
+            COLOR="#16A34A"; ICON="✅"; ESTADO="Conciliación OK — sin faltantes"
+            INTRO="Todos los leads del Google Sheet de Meta concilian con Sperant. Sin acción requerida."
           else
             echo "subject=⚠️ Auditoría leads $TODAY — el script falló (revisar)" >> "$GITHUB_OUTPUT"
+            COLOR="#D97706"; ICON="⚠️"; ESTADO="El script falló — revisar el run"
+            INTRO="La auditoría no pudo completarse. Revisa el log del run."
           fi
-          {
-            echo "Auditoría diaria Leads Sheet (Meta) vs Sperant — $TODAY"
-            echo ""
-            echo "Resumen (las últimas líneas del reporte):"
-            echo "----------------------------------------"
-            sed -n '/RESUMEN GLOBAL/,$p' /tmp/audit_output.txt 2>/dev/null || echo "(sin salida — el script no llegó a ejecutar)"
-            echo "----------------------------------------"
-            echo ""
-            echo "Run completo: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } > /tmp/mail_body.txt
+
+          # Reporte (desde RESUMEN GLOBAL) escapado para HTML
+          REPORTE=$(sed -n '/RESUMEN GLOBAL/,$p' /tmp/audit_output.txt 2>/dev/null \
+            | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+          [ -z "$REPORTE" ] && REPORTE="(sin salida — el script no llegó a ejecutar)"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          cat > /tmp/mail_body.html <<HTMLEOF
+          <!DOCTYPE html><html><body style="margin:0;padding:24px;background:#f4f4f5;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+            <div style="max-width:780px;margin:0 auto;background:#ffffff;border:1px solid #e4e4e7;border-radius:12px;overflow:hidden;">
+              <div style="background:${COLOR};color:#ffffff;padding:20px 26px;">
+                <div style="font-size:19px;font-weight:700;">${ICON}&nbsp; Auditoría Leads — Meta vs Sperant</div>
+                <div style="font-size:13px;opacity:.92;margin-top:4px;">${TODAY} &nbsp;·&nbsp; ${ESTADO}</div>
+              </div>
+              <div style="padding:22px 26px;">
+                <p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.5;">${INTRO}</p>
+                <pre style="background:#0f172a;color:#e2e8f0;padding:18px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre;margin:0;">${REPORTE}</pre>
+                <p style="margin:16px 0 0;color:#71717a;font-size:12px;line-height:1.6;">
+                  <b>Salud</b> &nbsp;·&nbsp; <code>GAP OPERATIVO</code> = el equipo no creó los manuales que debía &nbsp;·&nbsp;
+                  <code>REVISAR</code> = hay faltantes pero se crearon manuales &nbsp;·&nbsp; <code>OK</code> = sin faltantes.<br>
+                  <b>Movimiento</b> &nbsp;·&nbsp; <code>ΔSheet</code> leads que Alonso agregó al Excel &nbsp;·&nbsp;
+                  <code>ΔManual</code> reconciliados a mano &nbsp;·&nbsp; "Sheet creció, 0 manuales" = no se concilió ese día.
+                </p>
+              </div>
+              <div style="padding:14px 26px;background:#fafafa;border-top:1px solid #e4e4e7;font-size:12px;color:#71717a;">
+                <a href="${RUN_URL}" style="color:#2563eb;text-decoration:none;">Ver run completo en GitHub →</a>
+                &nbsp;·&nbsp; Reenviar a Alonso (alonso@tuna.pe) y Javier (javier@tuna.pe) si el gap persiste.
+              </div>
+            </div>
+          </body></html>
+          HTMLEOF
 
       - name: Enviar email del resultado (siempre)
         if: always()
@@ -138,7 +166,7 @@ jobs:
           to: marbe@tuna.pe
           cc: alonso@tuna.pe,javier@tuna.pe
           from: Auditoría Leads TUNA <marbe@tuna.pe>
-          body: file:///tmp/mail_body.txt
+          html_body: file:///tmp/mail_body.html
 
       - name: Fail job si hubo faltantes
         if: steps.audit.outputs.exit_code == '2'
