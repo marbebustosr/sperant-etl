@@ -1029,6 +1029,32 @@ def supabase_rpc_upsert_unit_demand(records: list[dict]) -> None:
     log.info("  ✓ Upserted %d unit demand rows via RPC", len(records))
 
 
+def supabase_rpc_sync_estado_from_sperant() -> None:
+    """
+    Propaga el estado_comercial (último periodo de sperant_unidades_demanda) a
+    tuna_project_units.estado. SOLO toca `estado`, nunca `estado_manual` (los
+    overrides manuales y canje quedan intactos) y solo unidades con match Sperant.
+    Mapeo: pre-asignado -> disponible; proceso de venta/separación/aprobación y
+    'no disponible' -> separado. Debe correr DESPUÉS del upsert de unit demand.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/rpc/sync_estado_from_sperant"
+    headers = _supabase_headers()
+    resp = requests.post(
+        url, headers=headers,
+        data=json.dumps({"p_focal_project_id": None, "p_apply": True}),
+        timeout=120,
+    )
+    if resp.status_code not in (200, 201, 204):
+        log.error("RPC sync_estado error %s: %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+    try:
+        changed = resp.json()
+        n = len(changed) if isinstance(changed, list) else 0
+    except Exception:
+        n = 0
+    log.info("  ✓ sync_estado_from_sperant: %d unidades actualizadas", n)
+
+
 def extract_interacciones(
     cur, sperant_code: str, year: int, month: int, utm_filter: Optional[str],
 ) -> list[dict]:
@@ -1281,6 +1307,9 @@ def run_etl():
     if all_unit_demand_rows:
         log.info("Upserting %d unit demand rows via RPC...", len(all_unit_demand_rows))
         supabase_rpc_upsert_unit_demand(all_unit_demand_rows)
+        # Propagar estado Sperant -> tuna_project_units.estado (post-upsert)
+        log.info("Sincronizando estado Sperant -> tuna_project_units...")
+        supabase_rpc_sync_estado_from_sperant()
 
     # Upsert individual interactions (row-per-touchpoint)
     if all_interacciones_rows:
