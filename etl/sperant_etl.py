@@ -28,6 +28,27 @@ import psycopg2
 import requests
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+# Redshift devuelve timestamps de Sperant en hora local Lima (sin TZ info).
+# Antes guardábamos esos datetimes naive con .isoformat() y Postgres los
+# interpretaba como UTC, dejando todas las columnas fecha_* atrasadas 5h
+# respecto a Sperant API. Fix 2026-05-28: localizar como Lima y convertir
+# a UTC explícitamente antes de serializar.
+LIMA_TZ = ZoneInfo("America/Lima")
+
+
+def _lima_to_utc_iso(dt) -> Optional[str]:
+    """Serializa un datetime de Redshift (Lima local, naive) a ISO UTC.
+
+    Si ya viene con tzinfo, no la re-localiza — solo convierte a UTC.
+    Si viene sin tzinfo, asume Lima.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LIMA_TZ)
+    return dt.astimezone(timezone.utc).isoformat()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -704,9 +725,9 @@ def extract_lead_details(
             "nombre_completo":        r[2],
             "celular":                r[3],
             "email":                  r[4],
-            "fecha_llegada_meta":     r[5].isoformat() if r[5] else None,
-            "fecha_cosecha":          r[6].isoformat() if r[6] else None,
-            "fecha_creacion_sperant": r[7].isoformat() if r[7] else None,
+            "fecha_llegada_meta":     _lima_to_utc_iso(r[5]),
+            "fecha_cosecha":          _lima_to_utc_iso(r[6]),
+            "fecha_creacion_sperant": _lima_to_utc_iso(r[7]),
             "horas_primer_contacto":  horas,
             "total_interacciones":    int(r[9]) if r[9] else 0,
             "nivel_interes":          r[10],
@@ -723,15 +744,15 @@ def extract_lead_details(
             "utm_medium":             r[21],
             "utm_term":               r[22],
             "asesor_nombre":          r[23],
-            "fecha_proforma":         r[24].isoformat() if r[24] else None,
-            "fecha_separacion":       r[25].isoformat() if r[25] else None,
-            "fecha_venta":            r[26].isoformat() if r[26] else None,
-            "fecha_cita_agendada":    r[27].isoformat() if r[27] else None,
-            "fecha_cita_completada":  r[28].isoformat() if r[28] else None,
+            "fecha_proforma":         _lima_to_utc_iso(r[24]),
+            "fecha_separacion":       _lima_to_utc_iso(r[25]),
+            "fecha_venta":            _lima_to_utc_iso(r[26]),
+            "fecha_cita_agendada":    _lima_to_utc_iso(r[27]),
+            "fecha_cita_completada":  _lima_to_utc_iso(r[28]),
             "canal_origen":           r[29],
             "tipo_novedad":           r[30],
             "subclasificacion":       r[31],
-            "last_interaction_at":    r[32].isoformat() if r[32] else None,
+            "last_interaction_at":    _lima_to_utc_iso(r[32]),
         })
 
     return results
@@ -1109,7 +1130,7 @@ def extract_interacciones(
     for r in rows:
         results.append({
             "sperant_cliente_id":  int(r[0]) if r[0] is not None else None,
-            "fecha":               r[1].isoformat() if r[1] else None,
+            "fecha":               _lima_to_utc_iso(r[1]),
             "asesor_nombre":       r[2],
             "origen":              r[3] or "",
             "tipo_interaccion":    r[4] or "",
