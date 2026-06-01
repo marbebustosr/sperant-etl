@@ -1,0 +1,38 @@
+{
+  "STRN": {
+    "sheet": 171,
+    "sperant_mes": 8,
+    "manuales": 0,
+    "faltantes": 6
+  },
+  "MA": {
+    "sheet": 116,
+    "sperant_mes": 11,
+    "manuales": 0,
+    "faltantes": 0
+  },
+  "GEMMA": {
+    "sheet": 350,
+    "sperant_mes": 20,
+    "manuales": 0,
+    "faltantes": 3
+  },
+  "MELGAR": {
+    "sheet": 251,
+    "sperant_mes": 4,
+    "manuales": 1,
+    "faltantes": 3
+  },
+  "PALACIOS": {
+    "sheet": 248,
+    "sperant_mes": 29,
+    "manuales": 0,
+    "faltantes": 6
+  },
+  "R125": {
+    "sheet": 342,
+    "sperant_mes": 3,
+    "manuales": 0,
+    "faltantes": 1
+  }
+}
