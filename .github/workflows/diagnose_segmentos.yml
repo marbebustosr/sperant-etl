@@ -1,0 +1,85 @@
+name: Diagnose Redshift — segmentos de Sperant
+
+# ¿Qué valores usa el campo `segmento` de tuna.interacciones, cómo se
+# distribuyen y qué relación tienen con nivel_interes? (análisis pedido
+# por MB 2026-07-13).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg2-binary
+
+      - name: Analyze segmentos
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          print("=== 1. Valores de segmento (global, todas las inmobiliarias TUNA) ===")
+          cur.execute("""
+              SELECT COALESCE(NULLIF(TRIM(segmento),''),'(vacío)') AS seg,
+                     COUNT(*) AS interacciones, COUNT(DISTINCT cliente_id) AS clientes,
+                     MIN(fecha_creacion)::date AS desde, MAX(fecha_creacion)::date AS hasta
+                FROM tuna.interacciones
+               GROUP BY 1 ORDER BY 2 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]:<28} {r[1]:>8} interacciones · {r[2]:>7} clientes · {r[3]} → {r[4]}")
+
+          print("\n=== 2. Segmento vs nivel_interes (¿son lo mismo?) ===")
+          cur.execute("""
+              SELECT COALESCE(NULLIF(TRIM(segmento),''),'(vacío)') AS seg,
+                     COALESCE(NULLIF(TRIM(nivel_interes),''),'(vacío)') AS nivel,
+                     COUNT(*) AS n
+                FROM tuna.interacciones
+               WHERE segmento IS NOT NULL AND TRIM(segmento) <> ''
+               GROUP BY 1,2 ORDER BY 1, 3 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  seg={r[0]:<26} nivel={r[1]:<26} {r[2]:>7}")
+
+          print("\n=== 3. ¿En qué tipos de interacción viaja el segmento? ===")
+          cur.execute("""
+              SELECT COALESCE(tipo_interaccion,'?') AS tipo,
+                     COUNT(*) FILTER (WHERE segmento IS NOT NULL AND TRIM(segmento) <> '') AS con_seg,
+                     COUNT(*) AS total
+                FROM tuna.interacciones
+               GROUP BY 1 ORDER BY 3 DESC LIMIT 15
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]:<30} con_segmento {r[1]:>8} / {r[2]:>8}")
+
+          print("\n=== 4. Palacios junio-2026: segmento del último touchpoint por cliente ===")
+          cur.execute("""
+              WITH ult AS (
+                SELECT cliente_id, segmento,
+                       ROW_NUMBER() OVER (PARTITION BY cliente_id ORDER BY fecha_creacion DESC) rn
+                  FROM tuna.interacciones
+                 WHERE codigo_proyecto = 'PALACIOS'
+                   AND segmento IS NOT NULL AND TRIM(segmento) <> ''
+              )
+              SELECT segmento, COUNT(*) FROM ult WHERE rn = 1 GROUP BY 1 ORDER BY 2 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]:<28} {r[1]:>6} clientes")
+          EOF
