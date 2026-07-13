@@ -1118,7 +1118,8 @@ def extract_interacciones(
             i.razon_desistimiento,
             NULLIF(TRIM(i.codigo_unidad), '')           AS codigo_unidad,
             NULLIF(TRIM(i.nombre_unidad), '')           AS nombre_unidad,
-            i.utm_source, i.utm_campaign, i.utm_content, i.utm_medium, i.utm_term
+            i.utm_source, i.utm_campaign, i.utm_content, i.utm_medium, i.utm_term,
+            NULLIF(TRIM(i.observacion), '')             AS observacion
         FROM tuna.interacciones i
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND DATE_PART('year',  i.fecha_creacion) = {year}
@@ -1143,6 +1144,9 @@ def extract_interacciones(
             "utm_content":         r[11],
             "utm_medium":          r[12],
             "utm_term":            r[13],
+            # Observación libre del asesor (ej. "Cita confirmada 4pm, zoom") —
+            # se muestra en la auditoría de citas de TunApp (MB 2026-07-13).
+            "observacion":         r[14],
         })
     # Filter out rows with missing required fields (cliente_id, fecha) —
     # the Supabase table has them as NOT NULL.
