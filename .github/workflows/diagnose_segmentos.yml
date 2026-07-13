@@ -61,7 +61,7 @@ jobs:
           print("\n=== 3. ¿En qué tipos de interacción viaja el segmento? ===")
           cur.execute("""
               SELECT COALESCE(tipo_interaccion,'?') AS tipo,
-                     COUNT(*) FILTER (WHERE segmento IS NOT NULL AND TRIM(segmento) <> '') AS con_seg,
+                     SUM(CASE WHEN segmento IS NOT NULL AND TRIM(segmento) <> '' THEN 1 ELSE 0 END) AS con_seg,
                      COUNT(*) AS total
                 FROM tuna.interacciones
                GROUP BY 1 ORDER BY 3 DESC LIMIT 15

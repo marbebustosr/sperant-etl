@@ -1,2 +1,5 @@
 logs/
 CLAUDE.md
+.env
+.env.local
+.env.production
