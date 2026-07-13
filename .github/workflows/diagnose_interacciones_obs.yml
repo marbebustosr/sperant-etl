@@ -1,0 +1,86 @@
+name: Diagnose Redshift — columnas de interacciones (observación)
+
+# ¿tuna.interacciones tiene el campo "Observación" que el asesor escribe en
+# Sperant (ej. "Cita confirmada 4pm, zoom")? MB quiere traerlo a TunApp para
+# la auditoría de citas. Este workflow lista el esquema completo de la tabla
+# y muestra una interacción de cita como muestra.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cliente_nombre:
+        description: "Nombre para la muestra (ILIKE)"
+        required: false
+        default: "Danitza"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg2-binary
+
+      - name: Inspect schema + sample
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          NOMBRE: ${{ github.event.inputs.cliente_nombre }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          print("=== Columnas de tuna.interacciones ===")
+          cur.execute("""
+              SELECT column_name, data_type
+                FROM svv_columns
+               WHERE table_schema = 'tuna' AND table_name = 'interacciones'
+               ORDER BY ordinal_position
+          """)
+          cols = cur.fetchall()
+          for c in cols:
+              print(f"  {c[0]:30s} {c[1]}")
+
+          print("\n=== Otras tablas del schema tuna (por si la observación vive aparte) ===")
+          cur.execute("""
+              SELECT DISTINCT table_name FROM svv_columns
+               WHERE table_schema = 'tuna' ORDER BY 1
+          """)
+          for t in cur.fetchall():
+              print(f"  {t[0]}")
+
+          # Muestra: interacción de cita del cliente indicado, con TODOS los campos
+          nombre = os.environ.get("NOMBRE", "Danitza")
+          print(f"\n=== Muestra: interacciones de clientes ILIKE '%{nombre}%' (todas las columnas) ===")
+          cur.execute(f"""
+              SELECT i.*
+                FROM tuna.interacciones i
+                JOIN tuna.clientes c ON c.id = i.cliente_id
+               WHERE c.nombres ILIKE %s OR c.apellidos ILIKE %s
+               ORDER BY i.fecha_creacion DESC
+               LIMIT 5
+          """, (f"%{nombre}%", f"%{nombre}%"))
+          colnames = [d[0] for d in cur.description]
+          for row in cur.fetchall():
+              print("  ---")
+              for k, v in zip(colnames, row):
+                  sv = str(v)
+                  if v is not None and sv.strip() not in ("", "None"):
+                      print(f"    {k}: {sv[:220]}")
+          EOF
