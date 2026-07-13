@@ -1123,7 +1123,8 @@ def extract_interacciones(
             i.fecha_programada,
             NULLIF(TRIM(i.estado), '')                  AS estado,
             NULLIF(TRIM(i.tipo_evento), '')             AS tipo_evento,
-            NULLIF(TRIM(i.satisfactorio), '')           AS satisfactorio
+            NULLIF(TRIM(i.satisfactorio), '')           AS satisfactorio,
+            NULLIF(TRIM(i.segmento), '')                AS segmento
         FROM tuna.interacciones i
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND DATE_PART('year',  i.fecha_creacion) = {year}
@@ -1158,6 +1159,9 @@ def extract_interacciones(
             "estado":              r[16],
             "tipo_evento":         r[17],
             "satisfactorio":       r[18],
+            # Segmento de gestión de Sperant (Nuevo/Contactado/No Contesta/
+            # Cita Agendada/VISITA/...) — eje distinto del nivel_interes.
+            "segmento":            r[19],
         })
     # Filter out rows with missing required fields (cliente_id, fecha) —
     # the Supabase table has them as NOT NULL.
