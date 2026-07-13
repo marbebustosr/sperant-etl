@@ -1119,7 +1119,11 @@ def extract_interacciones(
             NULLIF(TRIM(i.codigo_unidad), '')           AS codigo_unidad,
             NULLIF(TRIM(i.nombre_unidad), '')           AS nombre_unidad,
             i.utm_source, i.utm_campaign, i.utm_content, i.utm_medium, i.utm_term,
-            NULLIF(TRIM(i.observacion), '')             AS observacion
+            NULLIF(TRIM(i.observacion), '')             AS observacion,
+            i.fecha_programada,
+            NULLIF(TRIM(i.estado), '')                  AS estado,
+            NULLIF(TRIM(i.tipo_evento), '')             AS tipo_evento,
+            NULLIF(TRIM(i.satisfactorio), '')           AS satisfactorio
         FROM tuna.interacciones i
         WHERE i.codigo_proyecto = '{sperant_code}'
           AND DATE_PART('year',  i.fecha_creacion) = {year}
@@ -1147,6 +1151,13 @@ def extract_interacciones(
             # Observación libre del asesor (ej. "Cita confirmada 4pm, zoom") —
             # se muestra en la auditoría de citas de TunApp (MB 2026-07-13).
             "observacion":         r[14],
+            # Evento nativo de Sperant (asistencia real de la cita):
+            # fecha_programada + estado 'realizado'/'no realizado' + tipo_evento
+            # 'cita' + satisfactorio 'si'/'no' (MB 2026-07-13).
+            "fecha_programada":    r[15].isoformat() if r[15] else None,
+            "estado":              r[16],
+            "tipo_evento":         r[17],
+            "satisfactorio":       r[18],
         })
     # Filter out rows with missing required fields (cliente_id, fecha) —
     # the Supabase table has them as NOT NULL.
