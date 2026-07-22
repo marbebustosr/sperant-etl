@@ -126,6 +126,23 @@ PROJECTS = [
         "nombre":        "13 Romana",
         "utm_filter":    None,
     },
+    {
+        # Alta 2026-07-22 (auditoría Sperant vs TunApp): Roma 382 (Sperant id=20),
+        # 62 unidades / 54 disponibles, cotizador activo. Supabase project creado
+        # con nombre "08 Roma" (= tuna_focal_projects.name, requerido por el RLS
+        # de clientes que matchea por nombre).
+        "sperant_code":  "ROMA",
+        "supabase_id":   "1d5d4ade-d1b4-47c7-9eba-2bd4fda85b3e",
+        "nombre":        "08 Roma",
+        "utm_filter":    None,
+    },
+    {
+        # Alta 2026-07-22: INFINITY (Sperant id=19), 11 unidades / 10 disponibles.
+        "sperant_code":  "INF",
+        "supabase_id":   "75cde6d1-2426-4495-b32c-df7cf4ea4f87",
+        "nombre":        "13 Infinity 224",
+        "utm_filter":    None,
+    },
 ]
 
 # ---------------------------------------------------------------------------
