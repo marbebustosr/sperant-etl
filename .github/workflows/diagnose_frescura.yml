@@ -1,0 +1,48 @@
+name: Diagnose Redshift — frescura y estado del 303
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+      - name: Run
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'PYEOF'
+          import os, psycopg2
+          conn = psycopg2.connect(host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require")
+          cur = conn.cursor()
+          def q(sql, t=""):
+              print(f"\n--- {t}")
+              try: cur.execute(sql)
+              except Exception as e: conn.rollback(); print("  err:", e); return
+              print("  " + " | ".join(d[0] for d in cur.description))
+              for r in cur.fetchall(): print("  " + " | ".join("" if v is None else str(v) for v in r))
+          q("SELECT current_date hoy, current_timestamp ahora", "hoy en Redshift")
+          for t in ("proformas","proforma_unidad","abonos","pagos","interacciones","unidades"):
+              q(f"SELECT '{t}' tabla, MAX(fecha_actualizacion) upd, MAX(fecha_creacion) crea FROM tuna.{t}", f"frescura {t}")
+          q("""SELECT codigo_proforma, nombre, etiqueta, fecha_vcto, fecha_pago,
+                      monto_programado, monto_pagado, estado, fecha_actualizacion
+               FROM tuna.pagos WHERE codigo_proforma='2026-0001165' ORDER BY fecha_vcto""",
+            "cronograma del 303 (proforma 2026-0001165)")
+          q("SELECT * FROM tuna.abonos WHERE codigo_proforma='2026-0001165'", "abonos del 303")
+          q("""SELECT codigo, estado_comercial, codigo_proforma, precio_venta, fecha_separacion, fecha_actualizacion
+               FROM tuna.unidades WHERE codigo IN ('ROMA-303','ROMA-D18','ROMA-E11')""", "unidades del 303")
+          cur.close(); conn.close()
+          PYEOF
