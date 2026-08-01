@@ -43,13 +43,6 @@ jobs:
           cur = conn.cursor()
           code = os.environ.get("SPERANT_CODE") or "ROMA"
 
-          def cols(tbl):
-              cur.execute("""
-                SELECT column_name, data_type FROM information_schema.columns
-                WHERE table_schema='tuna' AND table_name=%s ORDER BY ordinal_position
-              """, (tbl,))
-              return cur.fetchall()
-
           def show(sql, params=None, title=""):
               print(f"\n--- {title}")
               try:
@@ -64,44 +57,42 @@ jobs:
               print(f"   ({len(rows)} filas)")
               return rows
 
-          print(f"\n===== PROFORMAS Y CRONOGRAMA — {code} =====")
+          print(f"\n===== DETALLE PROFORMAS — {code} =====")
 
-          # 1. Esquema de las tablas candidatas
-          for t in ("proformas", "proforma_unidad", "finanzas", "pagos", "abonos", "depositos"):
-              c = cols(t)
-              print(f"\n1) tuna.{t} ({len(c)} columnas):")
-              for name, dtype in c:
-                  print(f"   {name:35s} {dtype}")
+          # 1. Detalle por unidad de TODAS las proformas del proyecto
+          show("""SELECT codigo_proforma, codigo_unidad, tipo_unidad, asignacion,
+                         moneda, precio_venta, area_techada, area_libre, estado,
+                         documento_cliente, corredor, afecto_igv, nota_proforma,
+                         fecha_creacion
+                  FROM tuna.proforma_unidad
+                  WHERE codigo_proyecto = %s
+                  ORDER BY codigo_proforma DESC, tipo_unidad, codigo_unidad""",
+               (code,), title="1) proforma_unidad — detalle unidad por unidad")
 
-          # 2. ¿Qué proyectos tienen proformas?
-          show("""SELECT codigo_proyecto, COUNT(*) n, MIN(fecha_creacion) desde,
-                         MAX(fecha_creacion) hasta
-                  FROM tuna.proformas GROUP BY 1 ORDER BY 2 DESC""",
-               title="2) Proformas por proyecto")
+          # 2. Cronograma completo de las proformas que YA tienen abono (= separadas)
+          show("""SELECT p.codigo_proforma, p.nombres_cliente, p.apellidos_cliente,
+                         p.documento_cliente, p.nombre, p.etiqueta, p.moneda_venta,
+                         p.fecha_vcto, p.fecha_pago, p.monto_programado, p.monto_pagado,
+                         p.saldo, p.estado, p.tipo_cronograma
+                  FROM tuna.pagos p
+                  WHERE p.codigo_proyecto = %s AND p.activo
+                  ORDER BY p.codigo_proforma, p.fecha_vcto""",
+               (code,), title="2) Cronograma de pagos completo")
 
-          # 3. Proformas del proyecto pedido
-          show("""SELECT id, codigo_proforma, numero_contrato, documento_cliente,
-                         tipo_financiamiento, moneda, precio_base, precio_venta,
-                         vendedor, banco, origen, fecha_creacion
-                  FROM tuna.proformas WHERE codigo_proyecto = %s
-                  ORDER BY fecha_creacion DESC, id DESC LIMIT 60""",
-               (code,), title=f"3) Proformas de {code}")
+          # 3. Abonos efectivamente recibidos
+          show("""SELECT codigo_proforma, documento_cliente, fecha_abono, fecha_aplicacion,
+                         monto_abono, moneda_abono_real, tipo_cambio, forma_pago,
+                         numero_operacion, tipo_deposito, observacion
+                  FROM tuna.abonos WHERE codigo_proyecto = %s
+                  ORDER BY fecha_abono""",
+               (code,), title="3) Abonos recibidos")
 
-          # 4. Detalle por unidad (el desglose que buscamos)
-          show("""SELECT pu.*
-                  FROM tuna.proforma_unidad pu
-                  JOIN tuna.proformas p ON p.id = pu.proforma_id
-                  WHERE p.codigo_proyecto = %s
-                  ORDER BY pu.proforma_id DESC LIMIT 80""",
-               (code,), title=f"4) proforma_unidad de {code} (join por proforma_id)")
-
-          # 4b. Fallback si la FK no se llama proforma_id
-          show("SELECT * FROM tuna.proforma_unidad LIMIT 5", title="4b) muestra cruda proforma_unidad")
-
-          # 5. Cronograma de pagos — probar cada tabla candidata
-          for t in ("finanzas", "pagos", "abonos"):
-              show(f"SELECT * FROM tuna.{t} WHERE codigo_proyecto = %s ORDER BY 1 DESC LIMIT 25",
-                   (code,), title=f"5) tuna.{t} de {code}")
+          # 4. Estado actual de las unidades según el CRM
+          show("""SELECT codigo_unidad, nombre_unidad, tipo_unidad, estado,
+                         precio_venta, area_techada, area_libre
+                  FROM tuna.unidades WHERE codigo_proyecto = %s
+                  ORDER BY tipo_unidad, codigo_unidad""",
+               (code,), title="4) Unidades del proyecto (tuna.unidades)")
 
           cur.close(); conn.close()
           print("\n===== FIN =====")
