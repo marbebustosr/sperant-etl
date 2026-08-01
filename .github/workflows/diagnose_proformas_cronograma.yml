@@ -1,0 +1,108 @@
+name: Diagnose Redshift — Proformas, unidades y cronograma
+
+on:
+  workflow_dispatch:
+    inputs:
+      sperant_code:
+        description: "Código de proyecto en Sperant"
+        required: false
+        default: "ROMA"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install psycopg2-binary
+
+      - name: Run diagnostic
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          SPERANT_CODE: ${{ github.event.inputs.sperant_code }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"],
+              port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"],
+              user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"],
+              connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+          code = os.environ.get("SPERANT_CODE") or "ROMA"
+
+          def cols(tbl):
+              cur.execute("""
+                SELECT column_name, data_type FROM information_schema.columns
+                WHERE table_schema='tuna' AND table_name=%s ORDER BY ordinal_position
+              """, (tbl,))
+              return cur.fetchall()
+
+          def show(sql, params=None, title=""):
+              print(f"\n--- {title}")
+              try:
+                  cur.execute(sql, params or ())
+              except Exception as e:
+                  conn.rollback(); print(f"   (error: {e})"); return []
+              names = [d[0] for d in cur.description]
+              rows = cur.fetchall()
+              print("   " + " | ".join(names))
+              for r in rows:
+                  print("   " + " | ".join("" if v is None else str(v) for v in r))
+              print(f"   ({len(rows)} filas)")
+              return rows
+
+          print(f"\n===== PROFORMAS Y CRONOGRAMA — {code} =====")
+
+          # 1. Esquema de las tablas candidatas
+          for t in ("proformas", "proforma_unidad", "finanzas", "pagos", "abonos", "depositos"):
+              c = cols(t)
+              print(f"\n1) tuna.{t} ({len(c)} columnas):")
+              for name, dtype in c:
+                  print(f"   {name:35s} {dtype}")
+
+          # 2. ¿Qué proyectos tienen proformas?
+          show("""SELECT codigo_proyecto, COUNT(*) n, MIN(fecha_creacion) desde,
+                         MAX(fecha_creacion) hasta
+                  FROM tuna.proformas GROUP BY 1 ORDER BY 2 DESC""",
+               title="2) Proformas por proyecto")
+
+          # 3. Proformas del proyecto pedido
+          show("""SELECT id, codigo_proforma, numero_contrato, documento_cliente,
+                         tipo_financiamiento, moneda, precio_base, precio_venta,
+                         vendedor, banco, origen, fecha_creacion
+                  FROM tuna.proformas WHERE codigo_proyecto = %s
+                  ORDER BY fecha_creacion DESC, id DESC LIMIT 60""",
+               (code,), title=f"3) Proformas de {code}")
+
+          # 4. Detalle por unidad (el desglose que buscamos)
+          show("""SELECT pu.*
+                  FROM tuna.proforma_unidad pu
+                  JOIN tuna.proformas p ON p.id = pu.proforma_id
+                  WHERE p.codigo_proyecto = %s
+                  ORDER BY pu.proforma_id DESC LIMIT 80""",
+               (code,), title=f"4) proforma_unidad de {code} (join por proforma_id)")
+
+          # 4b. Fallback si la FK no se llama proforma_id
+          show("SELECT * FROM tuna.proforma_unidad LIMIT 5", title="4b) muestra cruda proforma_unidad")
+
+          # 5. Cronograma de pagos — probar cada tabla candidata
+          for t in ("finanzas", "pagos", "abonos"):
+              show(f"SELECT * FROM tuna.{t} WHERE codigo_proyecto = %s ORDER BY 1 DESC LIMIT 25",
+                   (code,), title=f"5) tuna.{t} de {code}")
+
+          cur.close(); conn.close()
+          print("\n===== FIN =====")
+          EOF
