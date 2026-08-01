@@ -75,7 +75,7 @@ jobs:
                          p.fecha_vcto, p.fecha_pago, p.monto_programado, p.monto_pagado,
                          p.saldo, p.estado, p.tipo_cronograma
                   FROM tuna.pagos p
-                  WHERE p.codigo_proyecto = %s AND p.activo
+                  WHERE p.codigo_proyecto = %s AND p.activo = 't'
                   ORDER BY p.codigo_proforma, p.fecha_vcto""",
                (code,), title="2) Cronograma de pagos completo")
 
@@ -88,11 +88,13 @@ jobs:
                (code,), title="3) Abonos recibidos")
 
           # 4. Estado actual de las unidades según el CRM
-          show("""SELECT codigo_unidad, nombre_unidad, tipo_unidad, estado,
-                         precio_venta, area_techada, area_libre
-                  FROM tuna.unidades WHERE codigo_proyecto = %s
-                  ORDER BY tipo_unidad, codigo_unidad""",
-               (code,), title="4) Unidades del proyecto (tuna.unidades)")
+          cur.execute("""SELECT column_name FROM information_schema.columns
+                         WHERE table_schema='tuna' AND table_name='unidades'
+                         ORDER BY ordinal_position""")
+          print("\n--- 4) columnas de tuna.unidades")
+          print("   " + ", ".join(c[0] for c in cur.fetchall()))
+          show("SELECT * FROM tuna.unidades WHERE codigo_proyecto = %s LIMIT 80",
+               (code,), title="4b) Unidades del proyecto")
 
           cur.close(); conn.close()
           print("\n===== FIN =====")
