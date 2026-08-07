@@ -1,9 +1,8 @@
 name: Diagnose Redshift — eventos de cita en 2025 (Palacios)
 
 # `nivel_interes = 'cita agendada'` NO existe en 2025: la taxonomía de Sperant
-# lo incorporó en 2026. Pero sí hay 6,224 interacciones 'creacion de evento' en
-# 2025 para Palacios. ¿Se puede distinguir cuáles de esos eventos son citas de
-# visita (el paso D del embudo) de los que son recordatorios de llamada?
+# lo incorporó ese año. Pero los eventos traen `tipo_evento` (llamada / visita /
+# …) desde el arranque — ahí puede estar el paso D del embudo para el histórico.
 
 on:
   workflow_dispatch:
@@ -36,30 +35,56 @@ jobs:
           )
           cur = conn.cursor()
 
-          print("=== 1. Columnas de tuna.interacciones ===")
+          print("=== 1. Palacios: tipo_evento por año ===")
           cur.execute("""
-              SELECT column_name, data_type FROM svv_columns
-               WHERE table_schema='tuna' AND table_name='interacciones'
-               ORDER BY ordinal_position
+              SELECT EXTRACT(year FROM fecha_creacion) AS anio,
+                     COALESCE(NULLIF(TRIM(tipo_evento),''),'(vacio)') AS te,
+                     COUNT(*) AS n, COUNT(DISTINCT cliente_id) AS clientes
+                FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND tipo='EVENTO'
+               GROUP BY 1,2 ORDER BY 1, 3 DESC
           """)
-          cols = [r[0] for r in cur.fetchall()]
-          for c in cols: print("  ", c)
+          for r in cur.fetchall():
+              print(f"  {int(r[0])}  {r[1]:<24} {r[2]:>7} eventos · {r[3]:>5} clientes")
 
-          print("\n=== 2. Otras tablas del schema tuna (¿hay una de eventos/citas?) ===")
-          cur.execute("SELECT DISTINCT table_name FROM svv_columns WHERE table_schema='tuna' ORDER BY 1")
-          print("  ", [r[0] for r in cur.fetchall()])
-
-          print("\n=== 3. Muestra cruda de 'creacion de evento' 2025 en Palacios ===")
+          print("\n=== 2. Palacios: nombre del evento por año (título que pone el asesor) ===")
           cur.execute("""
-              SELECT * FROM tuna.interacciones
-               WHERE codigo_proyecto='PALACIOS' AND tipo_interaccion='creacion de evento'
-                 AND fecha_creacion < '2026-01-01'
-               LIMIT 8
+              SELECT EXTRACT(year FROM fecha_creacion) AS anio,
+                     COALESCE(NULLIF(TRIM(nombre),''),'(vacio)') AS nom, COUNT(*) AS n
+                FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND tipo='EVENTO'
+               GROUP BY 1,2 ORDER BY 1, 3 DESC LIMIT 40
           """)
-          desc = [d[0] for d in cur.description]
-          for row in cur.fetchall():
-              print("  ---")
-              for k, v in zip(desc, row):
-                  if v is not None and str(v).strip() != "":
-                      print(f"    {k} = {str(v)[:160]}")
+          for r in cur.fetchall():
+              print(f"  {int(r[0])}  {r[1][:44]:<46} {r[2]:>7}")
+
+          print("\n=== 3. Palacios: eventos de VISITA por mes (candidatos al paso D) ===")
+          cur.execute("""
+              SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion),'YYYY-MM') AS m,
+                     COUNT(DISTINCT cliente_id) AS clientes_agendaron,
+                     SUM(CASE WHEN estado='realizado' THEN 1 ELSE 0 END) AS realizados,
+                     COUNT(*) AS eventos
+                FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND tipo='EVENTO'
+                 AND (LOWER(tipo_evento) LIKE '%visita%' OR LOWER(tipo_evento) LIKE '%cita%'
+                      OR LOWER(nombre) LIKE '%visita%' OR LOWER(nombre) LIKE '%cita%')
+               GROUP BY 1 ORDER BY 1
+          """)
+          rows = cur.fetchall()
+          if not rows: print("  (ninguno)")
+          for r in rows:
+              print(f"  {r[0]}  {r[1]:>5} clientes · {r[2]:>5} realizados · {r[3]:>5} eventos")
+
+          print("\n=== 4. Palacios: 'cita agendada' del ETL actual vs eventos de visita (2026, control) ===")
+          cur.execute("""
+              SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion),'YYYY-MM') AS m,
+                     COUNT(DISTINCT CASE WHEN LOWER(nivel_interes)='cita agendada' THEN cliente_id END) AS por_nivel,
+                     COUNT(DISTINCT CASE WHEN tipo='EVENTO' AND (LOWER(tipo_evento) LIKE '%visita%'
+                            OR LOWER(nombre) LIKE '%visita%') THEN cliente_id END) AS por_evento
+                FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND fecha_creacion >= '2026-01-01'
+               GROUP BY 1 ORDER BY 1
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]}  por nivel_interes {r[1]:>4} · por evento de visita {r[2]:>4}")
           EOF
