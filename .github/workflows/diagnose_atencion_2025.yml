@@ -1,0 +1,73 @@
+name: Diagnose Redshift — ¿las citas de 2025 viven en otra tabla?
+
+# En tuna.interacciones, 2025 solo tiene 12 eventos con tipo_evento='cita' para
+# Palacios, contra 92 'visita al proyecto' consumadas. Antes de concluir que el
+# agendamiento no se registraba, revisar tuna.atencion / seguimiento_atencion /
+# bitacora / pasos, que podrían llevar la cita por otro camino.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg2-binary
+
+      - name: Analyze tablas alternas
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          for tabla in ("atencion", "seguimiento_atencion", "bitacora", "pasos"):
+              print(f"\n{'='*70}\n=== tuna.{tabla} ===")
+              try:
+                  cur.execute("""
+                      SELECT column_name FROM svv_columns
+                       WHERE table_schema='tuna' AND table_name=%s ORDER BY ordinal_position
+                  """, (tabla,))
+                  cols = [r[0] for r in cur.fetchall()]
+                  print("  columnas:", cols)
+                  cur.execute(f"SELECT COUNT(*) FROM tuna.{tabla}")
+                  print("  filas totales:", cur.fetchone()[0])
+                  cur.execute(f"SELECT * FROM tuna.{tabla} LIMIT 3")
+                  desc = [d[0] for d in cur.description]
+                  for row in cur.fetchall():
+                      print("  ---")
+                      for k, v in zip(desc, row):
+                          if v is not None and str(v).strip() != "":
+                              print(f"    {k} = {str(v)[:120]}")
+              except Exception as e:
+                  conn.rollback()
+                  print("  ERROR:", str(e)[:200])
+
+          print(f"\n{'='*70}\n=== Palacios 2025: eventos con fecha_programada, por tipo_evento y mes ===")
+          cur.execute("""
+              SELECT TO_CHAR(DATE_TRUNC('month', fecha_programada),'YYYY-MM') AS m,
+                     COALESCE(NULLIF(TRIM(tipo_evento),''),'(vacio)') AS te,
+                     COUNT(DISTINCT cliente_id) AS clientes
+                FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND tipo='EVENTO'
+                 AND fecha_programada >= '2025-01-01' AND fecha_programada < '2026-01-01'
+               GROUP BY 1,2 ORDER BY 1,3 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]}  {r[1]:<14} {r[2]:>5} clientes")
+          EOF
