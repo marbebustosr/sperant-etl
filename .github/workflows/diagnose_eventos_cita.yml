@@ -1,0 +1,65 @@
+name: Diagnose Redshift — eventos de cita en 2025 (Palacios)
+
+# `nivel_interes = 'cita agendada'` NO existe en 2025: la taxonomía de Sperant
+# lo incorporó en 2026. Pero sí hay 6,224 interacciones 'creacion de evento' en
+# 2025 para Palacios. ¿Se puede distinguir cuáles de esos eventos son citas de
+# visita (el paso D del embudo) de los que son recordatorios de llamada?
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg2-binary
+
+      - name: Analyze eventos
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          print("=== 1. Columnas de tuna.interacciones ===")
+          cur.execute("""
+              SELECT column_name, data_type FROM svv_columns
+               WHERE table_schema='tuna' AND table_name='interacciones'
+               ORDER BY ordinal_position
+          """)
+          cols = [r[0] for r in cur.fetchall()]
+          for c in cols: print("  ", c)
+
+          print("\n=== 2. Otras tablas del schema tuna (¿hay una de eventos/citas?) ===")
+          cur.execute("SELECT DISTINCT table_name FROM svv_columns WHERE table_schema='tuna' ORDER BY 1")
+          print("  ", [r[0] for r in cur.fetchall()])
+
+          print("\n=== 3. Muestra cruda de 'creacion de evento' 2025 en Palacios ===")
+          cur.execute("""
+              SELECT * FROM tuna.interacciones
+               WHERE codigo_proyecto='PALACIOS' AND tipo_interaccion='creacion de evento'
+                 AND fecha_creacion < '2026-01-01'
+               LIMIT 8
+          """)
+          desc = [d[0] for d in cur.description]
+          for row in cur.fetchall():
+              print("  ---")
+              for k, v in zip(desc, row):
+                  if v is not None and str(v).strip() != "":
+                      print(f"    {k} = {str(v)[:160]}")
+          EOF
