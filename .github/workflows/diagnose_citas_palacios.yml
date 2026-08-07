@@ -1,0 +1,97 @@
+name: Diagnose Redshift — citas agendadas de Palacios
+
+# ¿Existe en Redshift la fecha de cita agendada de 2025? En Supabase
+# `sperant_leads.fecha_cita_agendada` está NULL en todo 2025 (el CTE
+# `citas_agendadas` se agregó al ETL el 2026-04-17 y el lookback de 3 meses
+# nunca alcanzó esos meses). Antes de reprocesar 19 meses hay que confirmar
+# que la fuente sí los tiene.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg2-binary
+
+      - name: Analyze citas agendadas
+        env:
+          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_PORT: ${{ secrets.REDSHIFT_PORT }}
+          REDSHIFT_DB:   ${{ secrets.REDSHIFT_DB }}
+          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host=os.environ["REDSHIFT_HOST"], port=int(os.environ["REDSHIFT_PORT"]),
+              dbname=os.environ["REDSHIFT_DB"], user=os.environ["REDSHIFT_USER"],
+              password=os.environ["REDSHIFT_PASSWORD"], connect_timeout=30, sslmode="require",
+          )
+          cur = conn.cursor()
+
+          print("=== 1. Palacios: interacciones con nivel_interes='cita agendada' por mes ===")
+          cur.execute("""
+              SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion),'YYYY-MM') AS m,
+                     COUNT(*) AS interacciones, COUNT(DISTINCT cliente_id) AS clientes
+                FROM tuna.interacciones
+               WHERE codigo_proyecto = 'PALACIOS'
+                 AND LOWER(nivel_interes) = 'cita agendada'
+               GROUP BY 1 ORDER BY 1
+          """)
+          rows = cur.fetchall()
+          if not rows:
+              print("  (ninguna) — Redshift NO tiene 'cita agendada' para PALACIOS")
+          for r in rows:
+              print(f"  {r[0]}  {r[1]:>6} interacciones · {r[2]:>5} clientes")
+
+          print("\n=== 2. Palacios: valores de nivel_interes por año (¿cómo se llamaba en 2025?) ===")
+          cur.execute("""
+              SELECT EXTRACT(year FROM fecha_creacion) AS anio,
+                     COALESCE(NULLIF(TRIM(nivel_interes),''),'(vacio)') AS nivel,
+                     COUNT(*) AS n
+                FROM tuna.interacciones
+               WHERE codigo_proyecto = 'PALACIOS'
+               GROUP BY 1,2 ORDER BY 1, 3 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  {int(r[0])}  {r[1]:<30} {r[2]:>7}")
+
+          print("\n=== 3. Palacios: 'visita al proyecto' por mes (el paso E, para contrastar) ===")
+          cur.execute("""
+              SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion),'YYYY-MM') AS m,
+                     COUNT(DISTINCT cliente_id) AS clientes
+                FROM tuna.interacciones
+               WHERE codigo_proyecto = 'PALACIOS'
+                 AND LOWER(tipo_interaccion) = 'visita al proyecto'
+               GROUP BY 1 ORDER BY 1
+          """)
+          for r in cur.fetchall():
+              print(f"  {r[0]}  {r[1]:>5} clientes")
+
+          print("\n=== 4. Palacios: rango total de interacciones (¿hasta dónde llega el histórico?) ===")
+          cur.execute("""
+              SELECT MIN(fecha_creacion)::date, MAX(fecha_creacion)::date, COUNT(*)
+                FROM tuna.interacciones WHERE codigo_proyecto = 'PALACIOS'
+          """)
+          r = cur.fetchone()
+          print(f"  {r[0]} → {r[1]} · {r[2]} interacciones")
+
+          print("\n=== 5. Palacios: tipos de interacción por año (¿cambió la taxonomía?) ===")
+          cur.execute("""
+              SELECT EXTRACT(year FROM fecha_creacion) AS anio,
+                     COALESCE(tipo_interaccion,'?') AS tipo, COUNT(*) AS n
+                FROM tuna.interacciones
+               WHERE codigo_proyecto = 'PALACIOS'
+               GROUP BY 1,2 ORDER BY 1, 3 DESC
+          """)
+          for r in cur.fetchall():
+              print(f"  {int(r[0])}  {r[1]:<32} {r[2]:>7}")
+          EOF

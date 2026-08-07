@@ -13,6 +13,10 @@ on:
         description: "Months to reprocess (default 3)"
         required: false
         default: "3"
+      only_projects:
+        description: "Sperant codes to limit the run to, comma-separated (e.g. PALACIOS). Empty = all"
+        required: false
+        default: ""
 
 permissions:
   issues: write
@@ -41,6 +45,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           LOOKBACK_MONTHS: ${{ github.event.client_payload.lookback_months || github.event.inputs.lookback_months || '3' }}
+          ONLY_PROJECTS: ${{ github.event.client_payload.only_projects || github.event.inputs.only_projects || '' }}
         run: python etl/sperant_etl.py
 
       - name: Notify on failure

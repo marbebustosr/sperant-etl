@@ -75,6 +75,11 @@ SUPABASE_KEY      = os.environ.get("SUPABASE_KEY",      "")  # anon key — set 
 # How many months back to process (default: current + 2 months back for safety)
 LOOKBACK_MONTHS   = int(os.environ.get("LOOKBACK_MONTHS", "3"))
 
+# Restringe la corrida a ciertos proyectos (códigos Sperant separados por coma).
+# Vacío = todos. Un backfill largo sin este filtro reescribe el histórico de los
+# 10 proyectos; con él se toca solo el que se quiere corregir.
+ONLY_PROJECTS     = [c.strip().upper() for c in os.environ.get("ONLY_PROJECTS", "").split(",") if c.strip()]
+
 # ---------------------------------------------------------------------------
 # Project mapping: Sperant code → Supabase project_id
 # For STRN (Strena), we filter by utm_campaign ILIKE '%paraiso%'
@@ -1243,6 +1248,13 @@ def run_etl():
     periods = get_lookback_periods(LOOKBACK_MONTHS)
     log.info("Processing %d periods: %s", len(periods), periods)
 
+    projects = [p for p in PROJECTS if not ONLY_PROJECTS or p["sperant_code"].upper() in ONLY_PROJECTS]
+    if ONLY_PROJECTS:
+        log.info("ONLY_PROJECTS=%s → %d de %d proyectos", ONLY_PROJECTS, len(projects), len(PROJECTS))
+        missing = [c for c in ONLY_PROJECTS if c not in {p["sperant_code"].upper() for p in PROJECTS}]
+        if missing:
+            raise SystemExit(f"ONLY_PROJECTS tiene códigos que no existen en PROJECTS: {missing}")
+
     # Connect to Redshift
     log.info("Connecting to Sperant Redshift...")
     conn = redshift_connect()
@@ -1257,7 +1269,7 @@ def run_etl():
     # Used after the bulk upsert to prune ghost rows via sync_sperant_leads_period.
     period_cliente_ids: dict[tuple[str, int, int], list[int]] = {}
 
-    for project in PROJECTS:
+    for project in projects:
         code         = project["sperant_code"]
         supabase_id  = project["supabase_id"]
         nombre       = project["nombre"]
