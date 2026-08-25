@@ -20,6 +20,12 @@ on:
 
 permissions:
   issues: write
+  # 🔴 Necesario para que Actions pueda emitir el token OIDC con el que el ETL
+  # se autentica ante la edge function `sperant-etl-bridge`. Sin esto no hay
+  # ACTIONS_ID_TOKEN_REQUEST_URL y el ETL cae al camino directo, que falla con
+  # 401 porque `anon` ya no puede ejecutar las RPC (revocado el 17-ago-2026).
+  # Es un permiso, no un secreto: no hay nada que rotar.
+  id-token: write
 
 jobs:
   etl:

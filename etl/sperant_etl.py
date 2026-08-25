@@ -210,6 +210,93 @@ def _supabase_headers() -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Puente OIDC — cómo escribe este ETL sin tener una llave de escritura
+#
+# Las 6 RPC que este ETL necesita son SECURITY DEFINER (corren como postgres).
+# Hasta el 17-ago-2026 se llamaban directo con la anon key. Ese día una
+# migración le revocó el EXECUTE a `anon` —con razón: la anon key es pública,
+# va en el bundle JS de las apps, y con ella cualquiera podía ejecutarlas— y
+# este ETL quedó caído 9 días en silencio, dejando el inventario de TunApp
+# congelado.
+#
+# La salida fácil era poner la service_role key en el secret de GitHub. Se
+# descartó: es la llave maestra de la base y no tiene por qué vivir en un CI.
+#
+# En su lugar: GitHub Actions emite un JWT firmado por GitHub, sin credencial
+# alguna (basta `permissions: id-token: write` en el workflow). La edge function
+# `sperant-etl-bridge` lo verifica contra la clave pública de GitHub, comprueba
+# que venga de este repo, y sólo entonces ejecuta la RPC con service_role del
+# lado del servidor. No hay secreto nuevo que rotar ni que nadie deba tipear.
+#
+# El header Authorization sigue llevando la anon key porque el gateway de
+# Supabase Functions lo exige; el gateway la consume y NO la reenvía, así que
+# el token OIDC viaja aparte, en X-GitHub-OIDC.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BRIDGE_AUDIENCE = "sperant-etl-bridge"
+
+
+def _oidc_token() -> str | None:
+    """
+    Pide a GitHub Actions un token OIDC para la audiencia del puente.
+
+    Devuelve None fuera de Actions (corrida local), y en ese caso el ETL cae al
+    camino directo — útil para depurar con una llave propia, sin debilitar CI.
+    """
+    url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+    tok = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not url or not tok:
+        return None
+    resp = requests.get(
+        f"{url}&audience={BRIDGE_AUDIENCE}",
+        headers={"Authorization": f"Bearer {tok}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    valor = resp.json().get("value")
+    if not valor:
+        raise RuntimeError("GitHub devolvió un token OIDC vacío")
+    return valor
+
+
+# Se pide UNA vez por corrida: el token vive ~10 min y una corrida completa
+# hace decenas de llamadas.
+_OIDC_CACHE: str | None = None
+_OIDC_RESUELTO = False
+
+
+def _rpc_post(nombre: str, payload: str, timeout: int = 120):
+    """
+    Ejecuta una RPC a través del puente OIDC. Si no hay OIDC disponible
+    (corrida local), cae al endpoint REST directo con la llave que haya.
+    """
+    global _OIDC_CACHE, _OIDC_RESUELTO
+    if not _OIDC_RESUELTO:
+        _OIDC_CACHE = _oidc_token()
+        _OIDC_RESUELTO = True
+        if _OIDC_CACHE:
+            log.info("  · usando el puente OIDC (sin llave de escritura)")
+        else:
+            log.warning("  · sin OIDC (corrida local): llamando la RPC directo")
+
+    if _OIDC_CACHE:
+        headers = {**_supabase_headers(), "X-GitHub-OIDC": _OIDC_CACHE}
+        return requests.post(
+            f"{SUPABASE_URL}/functions/v1/sperant-etl-bridge",
+            headers=headers,
+            data=json.dumps({"rpc": nombre, "args": json.loads(payload)}),
+            timeout=timeout,
+        )
+
+    return requests.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/{nombre}",
+        headers=_supabase_headers(),
+        data=payload,
+        timeout=timeout,
+    )
+
+
 def supabase_upsert(table: str, records: list[dict], on_conflict: str) -> None:
     """
     Upsert records into a Supabase table via REST API (anon key).
@@ -247,15 +334,12 @@ def supabase_rpc_upsert_leads(records: list[dict]) -> None:
     if not records:
         return
 
-    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_leads"
-    headers = _supabase_headers()
-
     batch_size = 200  # smaller batches — JSONB RPC is heavier
     total_processed = 0
     for i in range(0, len(records), batch_size):
         batch = records[i : i + batch_size]
         payload = json.dumps({"leads": batch})
-        resp = requests.post(url, headers=headers, data=payload, timeout=120)
+        resp = _rpc_post("upsert_sperant_leads", payload, timeout=120)
         if resp.status_code not in (200, 201, 204):
             log.error("RPC upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
@@ -286,15 +370,13 @@ def supabase_rpc_sync_leads_period(
         # Function short-circuits on empty array, but save the round-trip.
         return 0
 
-    url = f"{SUPABASE_URL}/rest/v1/rpc/sync_sperant_leads_period"
-    headers = _supabase_headers()
     payload = json.dumps({
         "p_project_id":  project_id,
         "p_year":        year,
         "p_month":       month,
         "p_cliente_ids": cliente_ids,
     })
-    resp = requests.post(url, headers=headers, data=payload, timeout=60)
+    resp = _rpc_post("sync_sperant_leads_period", payload, timeout=60)
     if resp.status_code not in (200, 201, 204):
         log.error("RPC sync_leads_period error %s: %s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
@@ -1059,12 +1141,12 @@ def supabase_rpc_upsert_unit_demand(records: list[dict]) -> None:
     """Upsert sperant_unidades_demanda via SECURITY DEFINER RPC."""
     if not records:
         return
-    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_unidades_demanda"
-    headers = _supabase_headers()
     batch_size = 200
     for i in range(0, len(records), batch_size):
         batch = records[i: i + batch_size]
-        resp = requests.post(url, headers=headers, data=json.dumps({"rows": batch}), timeout=120)
+        resp = _rpc_post(
+            "upsert_sperant_unidades_demanda", json.dumps({"rows": batch}), timeout=120
+        )
         if resp.status_code not in (200, 201, 204):
             log.error("RPC unit_demand upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
@@ -1080,11 +1162,9 @@ def supabase_rpc_sync_estado_from_sperant() -> None:
     Mapeo: pre-asignado -> disponible; proceso de venta/separación/aprobación y
     'no disponible' -> separado. Debe correr DESPUÉS del upsert de unit demand.
     """
-    url = f"{SUPABASE_URL}/rest/v1/rpc/sync_estado_from_sperant"
-    headers = _supabase_headers()
-    resp = requests.post(
-        url, headers=headers,
-        data=json.dumps({"p_focal_project_id": None, "p_apply": True}),
+    resp = _rpc_post(
+        "sync_estado_from_sperant",
+        json.dumps({"p_focal_project_id": None, "p_apply": True}),
         timeout=120,
     )
     if resp.status_code not in (200, 201, 204):
@@ -1198,13 +1278,13 @@ def supabase_rpc_upsert_interacciones(records: list[dict]) -> None:
     """
     if not records:
         return
-    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_interacciones"
-    headers = _supabase_headers()
     batch_size = 500  # lighter rows than sperant_leads
     total_processed = 0
     for i in range(0, len(records), batch_size):
         batch = records[i: i + batch_size]
-        resp = requests.post(url, headers=headers, data=json.dumps({"rows": batch}), timeout=180)
+        resp = _rpc_post(
+            "upsert_sperant_interacciones", json.dumps({"rows": batch}), timeout=180
+        )
         if resp.status_code not in (200, 201, 204):
             log.error("RPC interacciones upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
@@ -1221,15 +1301,12 @@ def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
     if not records:
         return
 
-    url = f"{SUPABASE_URL}/rest/v1/rpc/upsert_sperant_kpis"
-    headers = _supabase_headers()
-
     batch_size = 200
     total_processed = 0
     for i in range(0, len(records), batch_size):
         batch = records[i : i + batch_size]
         payload = json.dumps({"rows": batch})
-        resp = requests.post(url, headers=headers, data=payload, timeout=120)
+        resp = _rpc_post("upsert_sperant_kpis", payload, timeout=120)
         if resp.status_code not in (200, 201, 204):  # 204 = void fn success
             log.error("RPC kpis upsert error %s: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
