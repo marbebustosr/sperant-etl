@@ -1342,6 +1342,9 @@ def run_etl():
     all_kpis_rows          = []
     all_unit_demand_rows   = []
     all_interacciones_rows = []
+    # Pares (proyecto, período) que se cayeron. El bucle los atrapa y sigue;
+    # el centinela los reporta para que un fallo parcial no pase por verde.
+    fallos: list[dict] = []
     # (project_id, year, month) -> list of sperant_cliente_id emitted.
     # Used after the bulk upsert to prune ghost rows via sync_sperant_leads_period.
     period_cliente_ids: dict[tuple[str, int, int], list[int]] = {}
@@ -1415,6 +1418,16 @@ def run_etl():
 
             except Exception as e:
                 log.error("    ERROR processing %s %s: %s", code, period_label, e)
+                # 🔴 Este `except` es a propósito: un mes malo no debe tumbar la
+                # corrida entera. Pero hasta el 25-ago-2026 eso significaba que
+                # una corrida podía terminar EN VERDE habiendo perdido proyectos
+                # completos, sin que nadie se enterara. Ahora se acumulan y viajan
+                # al centinela, que pinta ámbar en /salud-datos.
+                fallos.append({
+                    "proyecto": code,
+                    "periodo":  period_label,
+                    "error":    str(e)[:300],
+                })
                 # Reconnect on transaction abort
                 try:
                     conn.rollback()
@@ -1462,8 +1475,70 @@ def run_etl():
         log.info("Upserting %d interaction rows via RPC...", len(all_interacciones_rows))
         supabase_rpc_upsert_interacciones(all_interacciones_rows)
 
+    total_filas = (
+        len(all_leads_rows) + len(all_kpis_rows)
+        + len(all_unit_demand_rows) + len(all_interacciones_rows)
+    )
+    if fallos:
+        log.warning(
+            "⚠️  La corrida perdió %d par(es) proyecto-período: %s",
+            len(fallos),
+            ", ".join(f"{f['proyecto']} {f['periodo']}" for f in fallos[:8]),
+        )
+    registrar_corrida(
+        filas=total_filas,
+        fallos=fallos,
+        estado="warning" if fallos else "ok",
+    )
     log.info("=== ETL complete ===")
 
 
+def registrar_corrida(filas: int, fallos: list[dict], estado: str,
+                      nota: str | None = None) -> None:
+    """
+    Deja la corrida registrada en `sync_runs` para que salga en el semáforo de
+    /salud-datos (Feria). Sin esto el ETL puede fallar en silencio: entre el 17 y
+    el 25-ago-2026 falló 9 noches seguidas y nadie se enteró — el inventario de
+    TunApp quedó congelado y sólo se descubrió por casualidad.
+
+    Nunca revienta: si el centinela falla, se loguea y la corrida se respeta. Un
+    problema para registrar el estado no debe convertirse en un ETL caído.
+
+    Ojo con la semántica de `rows_skipped` para esta fuente: cuenta **pares
+    proyecto-período** perdidos, no filas — cuando un par se cae nunca se
+    extrajeron sus filas, así que no se puede saber cuántas se perdieron, y
+    inventar el número sería peor que no tenerlo.
+    """
+    detalle = list(fallos)
+    if nota:
+        detalle.append({"nota": nota})
+    try:
+        resp = _rpc_post(
+            "registrar_corrida_sperant_etl",
+            json.dumps({
+                "p_rows_received": filas,
+                "p_rows_imported": filas,
+                "p_rows_skipped":  len(fallos),
+                "p_status":        estado,
+                "p_detalle":       detalle,
+            }),
+            timeout=30,
+        )
+        if resp.status_code not in (200, 201, 204):
+            log.error("centinela: %s %s", resp.status_code, resp.text[:300])
+        else:
+            log.info("  ✓ centinela registrado (%s, %d filas, %d fallos)",
+                     estado, filas, len(fallos))
+    except Exception as e:
+        log.error("centinela: no se pudo registrar la corrida: %s", e)
+
+
 if __name__ == "__main__":
-    run_etl()
+    try:
+        run_etl()
+    except Exception as e:
+        # Registrar la caída ANTES de propagar: es justo el caso en que el
+        # semáforo tiene que ponerse rojo.
+        log.exception("ETL abortado")
+        registrar_corrida(filas=0, fallos=[], estado="error", nota=str(e)[:300])
+        raise
