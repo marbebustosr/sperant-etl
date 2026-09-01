@@ -24,6 +24,8 @@ Author: Tuna / Claude (2026-04-08)
 import os
 import json
 import logging
+import random
+import time
 import psycopg2
 import requests
 from datetime import datetime, timezone
@@ -266,7 +268,95 @@ _OIDC_CACHE: str | None = None
 _OIDC_RESUELTO = False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Reintentos: un 502 del puente no puede costar el día entero
+#
+# El 1-sep-2026 el ETL murió con `502 Bad Gateway` en sperant-etl-bridge y estuvo
+# 30 h sin cargar; nadie se enteró hasta que los números de TunApp no cuadraron
+# contra Meta. No hubo NINGÚN log de la función, sólo del gateway: se cayó en el
+# arranque, no ejecutando. Relanzar a mano bastó — era transitorio.
+#
+# Sólo se reintenta lo que puede salir distinto la próxima vez: errores de red y
+# 429/502/503/504. Un 401/403 (auth) o un 500 (la RPC falló de verdad, el puente
+# devuelve su mensaje) son deterministas y reintentarlos sólo esconde el problema.
+#
+# Es seguro reintentar porque las 7 RPC de la lista blanca son upserts
+# idempotentes: si el 504 llegó DESPUÉS de que la RPC corriera, repetirla no
+# duplica nada.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RPC_REINTENTOS = 3          # 4 intentos en total
+RPC_ESPERA_BASE = 2.0       # segundos; 2, 6, 18 (+ jitter)
+STATUS_REINTENTABLES = {429, 502, 503, 504}
+
+
 def _rpc_post(nombre: str, payload: str, timeout: int = 120):
+    """
+    Ejecuta una RPC a través del puente OIDC, con reintentos ante fallos
+    transitorios. Devuelve el `requests.Response` tal cual, como antes.
+    """
+    ultimo_error: Exception | None = None
+
+    for intento in range(RPC_REINTENTOS + 1):
+        if intento:
+            # Exponencial con jitter: dos corridas en paralelo no rebotan juntas.
+            espera = RPC_ESPERA_BASE * (3 ** (intento - 1)) * random.uniform(0.8, 1.2)
+            log.warning(
+                "  · %s: reintento %d/%d en %.1fs (%s)",
+                nombre, intento, RPC_REINTENTOS, espera,
+                ultimo_error or "respuesta transitoria",
+            )
+            time.sleep(espera)
+
+        try:
+            resp = _rpc_post_once(nombre, payload, timeout)
+        except (requests.ConnectionError, requests.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
+            ultimo_error = e
+            if intento == RPC_REINTENTOS:
+                log.error("  ✗ %s: sin red tras %d intentos", nombre, intento + 1)
+                raise
+            continue
+
+        # 🔴 El token OIDC vive ~10 min y se pide UNA vez por corrida; una corrida
+        # larga (o estas mismas esperas) puede pasarse. Un 401 con OIDC puesto es
+        # casi siempre eso, así que se renueva y se reintenta — una sola vez, para
+        # no enmascarar un token de verdad rechazado.
+        if resp.status_code == 401 and _OIDC_CACHE and intento == 0:
+            log.warning("  · %s: 401 con OIDC — renovando el token y reintentando", nombre)
+            _renovar_oidc()
+            ultimo_error = RuntimeError("401 (token OIDC vencido)")
+            continue
+
+        if resp.status_code in STATUS_REINTENTABLES and intento < RPC_REINTENTOS:
+            ultimo_error = RuntimeError(f"HTTP {resp.status_code}")
+            continue
+
+        # 🔴 «Recuperado» sólo si de verdad se recuperó. Al agotar los reintentos
+        # se sale por acá con el último 502 encima, y decir «recuperado» ahí es
+        # exactamente el log engañoso que hizo que el 502 del 1-sep pasara 30 h
+        # inadvertido. El llamador hace raise_for_status(), pero el log es lo que
+        # alguien lee primero.
+        if resp.status_code in STATUS_REINTENTABLES:
+            log.error(
+                "  ✗ %s: sigue en HTTP %d tras %d intentos — se abandona",
+                nombre, resp.status_code, intento + 1,
+            )
+        elif intento:
+            log.info("  ✓ %s: recuperado al intento %d", nombre, intento + 1)
+        return resp
+
+    return resp  # inalcanzable; el bucle sale por return o por raise
+
+
+def _renovar_oidc() -> None:
+    """Fuerza que la próxima llamada pida un token OIDC nuevo."""
+    global _OIDC_CACHE, _OIDC_RESUELTO
+    _OIDC_CACHE = None
+    _OIDC_RESUELTO = False
+
+
+def _rpc_post_once(nombre: str, payload: str, timeout: int = 120):
     """
     Ejecuta una RPC a través del puente OIDC. Si no hay OIDC disponible
     (corrida local), cae al endpoint REST directo con la llave que haya.
