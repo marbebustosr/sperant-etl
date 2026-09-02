@@ -78,9 +78,15 @@ jobs:
             --description "Auditoría leads Meta vs Sperant" 2>/dev/null || true
 
           TODAY=$(date -u +%Y-%m-%d)
-          TITLE="🔴 Auditoría leads — faltantes detectados ($TODAY)"
+          # 🔴 El título NO lleva la fecha: es un hilo único que se comenta cada día.
+          # Con la fecha dentro, la búsqueda de abajo nunca encontraba el de ayer y
+          # se creaba un issue nuevo por día — 103 abiertos entre may y sep-2026,
+          # todos con los MISMOS 17 leads. La alarma se volvió ruido y nadie la miró.
+          TITLE="🔴 Auditoría leads — faltantes detectados"
           BODY_FILE=/tmp/issue_body.md
           {
+            echo "### Corrida del $TODAY"
+            echo ""
             echo "Auditoría automática diaria. Hay leads en el Google Sheet de Meta que **no concilian** con Sperant."
             echo ""
             echo "Revisar el resumen (columna **Salud**: \`GAP OPERATIVO\` = el equipo no creó los manuales que debía)."
@@ -94,8 +100,9 @@ jobs:
             echo "cc @marbebustosr — reenviar a Alonso (alonso@tuna.pe) y Javier (javier@tuna.pe) si el gap persiste."
           } > "$BODY_FILE"
 
-          # Reusar issue abierto del día si existe; si no, crear nuevo
-          EXISTING=$(gh issue list --label audit-leads --state open --search "$TODAY in:title" --json number --jq '.[0].number')
+          # Un solo hilo abierto: se comenta el que haya, sea de cuándo sea. Si no
+          # hay ninguno (porque alguien lo cerró al resolver), se crea uno nuevo.
+          EXISTING=$(gh issue list --label audit-leads --state open --limit 1 --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body-file "$BODY_FILE"
           else
