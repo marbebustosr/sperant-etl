@@ -690,6 +690,28 @@ def extract_lead_details(
         FROM ultimo_estado
     ),
 
+    -- 9b. Último SEGMENTO conocido (eje de gestión: dónde está el lead en el embudo).
+    --     Es un eje distinto del nivel_interes (cuánto calienta) y hasta hoy no se traía:
+    --     sperant_leads.segment estaba NULL en el 100 % de las filas, así que no había
+    --     forma de reportar el embudo ni de espejarlo contra el pipeline de GHL.
+    --     Solo ~28 % de las interacciones trae segmento, por eso se toma el último NO NULO:
+    --     con FIRST_VALUE a secas la mayoría de los leads saldría en blanco igual.
+    ultimo_segmento AS (
+        SELECT
+            i.cliente_id,
+            FIRST_VALUE(NULLIF(TRIM(i.segmento), ''))
+                OVER (PARTITION BY i.cliente_id ORDER BY i.fecha_creacion DESC
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                ) AS segmento
+        FROM tuna.interacciones i
+        INNER JOIN cosecha_periodo cp ON cp.cliente_id = i.cliente_id
+        WHERE i.codigo_proyecto = '{sperant_code}'
+          AND NULLIF(TRIM(i.segmento), '') IS NOT NULL
+    ),
+    ultimo_segmento_dedup AS (
+        SELECT DISTINCT cliente_id, segmento FROM ultimo_segmento
+    ),
+
     -- 10. Hito flags.
     proformas AS (
         SELECT i.cliente_id, TRUE AS tiene_proforma, MIN(i.fecha_creacion) AS fecha_proforma
@@ -869,7 +891,11 @@ def extract_lead_details(
             ELSE 'RECAP_CROSS'
         END                                                                     AS subclasificacion,
 
-        ui.last_interaction_at
+        ui.last_interaction_at,
+
+        -- Al final a propósito: el mapeo de abajo es POSICIONAL (r[0]..r[N]) y meter
+        -- una columna en medio desplazaría todos los índices.
+        useg.segmento                                                           AS segment
 
     FROM cosecha_periodo cp
     LEFT JOIN datos_cliente              dc  ON dc.cliente_id  = cp.cliente_id
@@ -887,6 +913,7 @@ def extract_lead_details(
     LEFT JOIN citas_agendadas            ca  ON ca.cliente_id  = cp.cliente_id
     LEFT JOIN citas_completadas          cc  ON cc.cliente_id  = cp.cliente_id
     LEFT JOIN ultima_interaccion         ui  ON ui.cliente_id  = cp.cliente_id
+    LEFT JOIN ultimo_segmento_dedup      useg ON useg.cliente_id = cp.cliente_id
     ORDER BY cp.fecha_creacion
     """
 
@@ -907,7 +934,7 @@ def extract_lead_details(
     # 24 fecha_proforma 25 fecha_separacion 26 fecha_venta
     # 27 fecha_cita_agendada 28 fecha_cita_completada
     # 29 canal_origen 30 tipo_novedad 31 subclasificacion
-    # 32 last_interaction_at
+    # 32 last_interaction_at 33 segment
     for r in rows:
         horas = float(r[8]) if r[8] is not None else None
         if horas is not None and horas < 0:
@@ -947,6 +974,7 @@ def extract_lead_details(
             "tipo_novedad":           r[30],
             "subclasificacion":       r[31],
             "last_interaction_at":    _lima_to_utc_iso(r[32]),
+            "segment":                r[33],
         })
 
     return results
