@@ -498,10 +498,10 @@ def extract_lead_details(
     Extract lead-level data for a project+month using the COSECHA model.
 
     Seed universe = first creational touchpoint per cliente_id in this project,
-    within the period, across ALL channels (Meta Ads, Manual, Chat, Sala de
-    Ventas, Feria). Each lead gets classified with:
+    within the period, across ALL channels (Meta Ads, Manual, Chat, API, Portal
+    inmobiliario, Sala de Ventas, Feria). Each lead gets classified with:
 
-      canal_origen       — META_ADS | MANUAL | CHAT | SALA_VENTAS | FERIA | OTRO
+      canal_origen       — META_ADS | MANUAL | CHAT | API | PORTAL | SALA_VENTAS | FERIA | OTRO
       tipo_novedad       — NUEVO | RECAPTURADO
       subclasificacion   — NUEVO | RECAP_MISMO | RECAP_CROSS | RECAP_SILENT
 
@@ -532,6 +532,7 @@ def extract_lead_details(
               OR (i.origen = 'manual'       AND i.tipo_interaccion = 'creación de cliente')
               OR (i.origen = 'sperant_chat' AND i.tipo_interaccion = 'creación de cliente')
               OR (i.origen = 'api'          AND i.tipo_interaccion = 'creación de cliente')
+              OR (i.origen = 'portalinmobiliario' AND i.tipo_interaccion IN ('creación de cliente','portal inmobiliario'))
               OR i.tipo_interaccion IN ('visita al proyecto','visita a feria','visita a oficinas')
               )
         """
@@ -541,6 +542,11 @@ def extract_lead_details(
         # NOTE: 'api' added 2026-04-28 — Sperant integraciones nuevas (WhatsApp
         # Business API, chatbots, importes) crean clientes con origen='api'.
         # Sin esto, leads como Brian Taboada (Gemma 2026-04) quedaban fuera de cosecha.
+        # NOTE: 'portalinmobiliario' added 2026-10-01 — los leads de portales (Urbania,
+        # Adondevivir…) nunca entraron: desde jun-2026 faltaban 12 de 13 en Palacios y 6
+        # de 9 en Melgar, y sus citas salían en blanco en TunApp (auditoría de Alonso).
+        # 'portal inmobiliario' sin 'creación de cliente' = cliente que ya existía y
+        # vuelve por un portal a este proyecto: también es lead del proyecto.
 
     query = f"""
     WITH
@@ -852,6 +858,7 @@ def extract_lead_details(
             WHEN cp.origen = 'manual'       AND cp.tipo_interaccion = 'creación de cliente' THEN 'MANUAL'
             WHEN cp.origen = 'sperant_chat' AND cp.tipo_interaccion = 'creación de cliente' THEN 'CHAT'
             WHEN cp.origen = 'api'          AND cp.tipo_interaccion = 'creación de cliente' THEN 'API'
+            WHEN cp.origen = 'portalinmobiliario'                                THEN 'PORTAL'
             WHEN cp.tipo_interaccion IN ('visita al proyecto','visita a oficinas')          THEN 'SALA_VENTAS'
             WHEN cp.tipo_interaccion = 'visita a feria'                          THEN 'FERIA'
             ELSE 'OTRO'
@@ -1411,6 +1418,52 @@ def supabase_rpc_upsert_interacciones(records: list[dict]) -> None:
     log.info("  ✓ Upserted %d interaction rows via RPC", total_processed)
 
 
+def extract_identidad(cur, cliente_ids) -> list[dict]:
+    """
+    Nombre, celular, correo y último vendedor (tuna.clientes) de TODO cliente con
+    interacciones en la corrida, sea o no lead nuevo del mes.
+
+    sperant_leads solo tiene la cosecha (primer alta del cliente en el proyecto). Un
+    cliente de 2023 que vuelve por el bot, o uno que llega a un proyecto sin alta en él,
+    tiene interacciones —y por tanto cita o visita en TunApp— pero no ficha: su fila en
+    «Detalle de citas» salía sin nombre, celular ni correo (Alonso, 01-oct-2026).
+    """
+    ids = sorted({int(x) for x in cliente_ids if x is not None})
+    out: list[dict] = []
+    for i in range(0, len(ids), 1000):
+        lista = ",".join(str(x) for x in ids[i: i + 1000])
+        cur.execute(f"""
+            SELECT id,
+                   TRIM(COALESCE(nombres, '') || ' ' || COALESCE(apellidos, '')),
+                   COALESCE(NULLIF(TRIM(celulares), ''), NULLIF(TRIM(telefono), '')),
+                   NULLIF(TRIM(email), ''),
+                   NULLIF(TRIM(ultimo_vendedor), '')
+            FROM tuna.clientes
+            WHERE id IN ({lista})
+        """)
+        for r in cur.fetchall():
+            out.append({
+                "sperant_cliente_id": int(r[0]),
+                "nombre_completo":    r[1] or None,
+                "celular":            r[2],
+                "email":              r[3],
+                "ultimo_vendedor":    r[4],
+            })
+    return out
+
+
+def supabase_rpc_upsert_clientes(records: list[dict]) -> None:
+    """Upsert sperant_clientes vía upsert_sperant_clientes(JSONB), por el puente OIDC."""
+    batch_size = 1000
+    for i in range(0, len(records), batch_size):
+        batch = records[i: i + batch_size]
+        resp = _rpc_post("upsert_sperant_clientes", json.dumps({"rows": batch}), timeout=120)
+        if resp.status_code not in (200, 201, 204):
+            log.error("RPC clientes upsert error %s: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+    log.info("  ✓ Upserted %d clientes (identidad) via RPC", len(records))
+
+
 def supabase_rpc_upsert_kpis(records: list[dict]) -> None:
     """
     Upsert sperant_kpis via the upsert_sperant_kpis(JSONB) SECURITY DEFINER function.
@@ -1554,6 +1607,21 @@ def run_etl():
                     conn = redshift_connect()
                     cur = conn.cursor()
 
+    # Identidad de todo cliente con interacciones (no solo la cosecha). Un fallo
+    # aquí no tumba la corrida: va al centinela como un par más.
+    identidad_rows: list[dict] = []
+    try:
+        identidad_rows = extract_identidad(
+            cur, [r["sperant_cliente_id"] for r in all_interacciones_rows])
+        log.info("%d clientes con identidad", len(identidad_rows))
+    except Exception as e:
+        log.error("ERROR extrayendo identidad de clientes: %s", e)
+        fallos.append({"proyecto": "(identidad)", "periodo": "-", "error": str(e)[:300]})
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     cur.close()
     conn.close()
     log.info("Redshift queries complete. Writing to Supabase...")
@@ -1593,9 +1661,18 @@ def run_etl():
         log.info("Upserting %d interaction rows via RPC...", len(all_interacciones_rows))
         supabase_rpc_upsert_interacciones(all_interacciones_rows)
 
+    if identidad_rows:
+        log.info("Upserting %d clientes (identidad) via RPC...", len(identidad_rows))
+        try:
+            supabase_rpc_upsert_clientes(identidad_rows)
+        except Exception as e:
+            log.error("ERROR escribiendo identidad de clientes: %s", e)
+            fallos.append({"proyecto": "(identidad)", "periodo": "-", "error": str(e)[:300]})
+
     total_filas = (
         len(all_leads_rows) + len(all_kpis_rows)
         + len(all_unit_demand_rows) + len(all_interacciones_rows)
+        + len(identidad_rows)
     )
     if fallos:
         log.warning(
