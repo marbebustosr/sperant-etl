@@ -97,7 +97,7 @@ jobs:
             echo ""
             echo "Detalle completo (JSON) en el log del run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo ""
-            echo "cc @marbebustosr — reenviar a Alonso (alonso@tuna.pe) y Javier (javier@tuna.pe) si el gap persiste."
+            echo "cc @marbebustosr — reenviar a Alonso (alonso@tuna.pe) si el gap persiste."
           } > "$BODY_FILE"
 
           # Un solo hilo abierto: se comenta el que haya, sea de cuándo sea. Si no
@@ -173,7 +173,7 @@ jobs:
               </div>
               <div style="padding:14px 26px;background:#fafafa;border-top:1px solid #e4e4e7;font-size:12px;color:#71717a;">
                 <a href="${RUN_URL}" style="color:#2563eb;text-decoration:none;">Ver run completo en GitHub →</a>
-                &nbsp;·&nbsp; Reenviar a Alonso (alonso@tuna.pe) y Javier (javier@tuna.pe) si el gap persiste.
+                &nbsp;·&nbsp; Reenviar a Alonso (alonso@tuna.pe) si el gap persiste.
               </div>
             </div>
           </body></html>
@@ -190,7 +190,7 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           subject: ${{ steps.mail.outputs.subject }}
           to: marbe@tuna.pe
-          cc: alonso@tuna.pe,javier@tuna.pe
+          cc: alonso@tuna.pe
           from: Auditoría Leads TUNA <marbe@tuna.pe>
           html_body: file:///tmp/mail_body.html
 
