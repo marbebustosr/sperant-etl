@@ -1,9 +1,9 @@
 name: Auditoría diaria — Leads Sheet vs Sperant
 
+# Sin schedule (9-oct-2026): MB pidió dejar de recibir este correo diario (ruido; los 17 faltantes son
+# los mismos hace meses). Queda el disparo manual. Para reactivar: restaurar
+#   schedule: [{ cron: "0 13 * * *" }]  # 8am Lima = 13 UTC (después del ETL de 6am)
 on:
-  schedule:
-    - cron: "0 13 * * *" # 8am Lima = 13 UTC (después del ETL de 6am)
-
   workflow_dispatch:
     inputs:
       sheet_id:
