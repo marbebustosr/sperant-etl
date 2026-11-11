@@ -150,6 +150,16 @@ PROJECTS = [
         "nombre":        "13 Infinity 224",
         "utm_filter":    None,
     },
+    {
+        # Alta 2026-11-10: BORGOÑO 1080 (Sperant id=21, código BORGONO), cliente externo
+        # COPRISA. 26 unidades (11 deptos + 11 estac. + 4 depósitos). Inicio de ventas
+        # 16-nov-2026. Supabase project "14 Borgoño 1080" (= tuna_focal_projects.name,
+        # requerido por el RLS de clientes que matchea por nombre).
+        "sperant_code":  "BORGONO",
+        "supabase_id":   "b3c3e5f4-60ba-4fd3-9ff2-5b1cf0dd5505",
+        "nombre":        "14 Borgoño 1080",
+        "utm_filter":    None,
+    },
 ]
 
 # ---------------------------------------------------------------------------
