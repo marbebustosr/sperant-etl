@@ -1,8 +1,16 @@
 name: Sperant → Supabase ETL
 
 on:
+  # 16-nov-2026: GitHub corre estos `schedule:` con 5-10 h de atraso (el de las 6:00 Lima salió a las 15:41), así
+  # que el Plan del día de las 8:00 leía SIEMPRE el espejo del día anterior («el ETL no ha vuelto a cargar»).
+  # El que manda la hora es el reloj de Cloudflare (tuna-bots/cloudflare/reloj/jobs.js: 6:30 Lima y antes de cada
+  # cierre, por workflow_dispatch). Estos crons quedan de RED: de madrugada y en minutos raros (menos cola), para
+  # que al menos uno haya cargado antes de las 8:00 aunque el reloj falle. El repo es público: los minutos no cuestan.
   schedule:
-    - cron: "0 11 * * *" # 6am Lima = 11 UTC
+    - cron: "17 3 * * *"  # 22:17 Lima
+    - cron: "17 6 * * *"  # 1:17 Lima
+    - cron: "17 9 * * *"  # 4:17 Lima
+    - cron: "0 11 * * *"  # 6:00 Lima
 
   repository_dispatch:
     types: [trigger-etl]
@@ -17,6 +25,11 @@ on:
         description: "Sperant codes to limit the run to, comma-separated (e.g. PALACIOS). Empty = all"
         required: false
         default: ""
+
+# Dos disparos juntos (reloj + red) no se pisan: el segundo espera al primero.
+concurrency:
+  group: sperant-etl
+  cancel-in-progress: false
 
 permissions:
   issues: write
